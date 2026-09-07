@@ -62,6 +62,7 @@ code{background:var(--bg2);border:1px solid var(--line);border-radius:3px;paddin
   <a class="brand" href="/ui">Ollama proxy</a>
   <nav>
     <a href="/ui" class="{{ 'active' if path in ('/ui', '/ui/') or path.startswith('/ui/r/') else '' }}">Log</a>
+    <a href="/ui/usage" class="{{ 'active' if path.startswith('/ui/usage') else '' }}">Spotřeba</a>
     <a href="/ui/providers" class="{{ 'active' if path.startswith('/ui/providers') else '' }}">Poskytovatelé</a>
     <a href="/ui/keys" class="{{ 'active' if path.startswith('/ui/keys') else '' }}">API klíče</a>
     <a href="/ui/settings" class="{{ 'active' if path.startswith('/ui/settings') else '' }}">Nastavení</a>

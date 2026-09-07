@@ -2,7 +2,7 @@
 {% block title %}Log{% endblock %}
 {% block content %}
 <h1>Log dotazů</h1>
-<p class="sub">upstream {{ upstream }} · {{ total | num }} záznamů{% if filters.since or filters.model or filters.provider or filters.placement or filters.key_name or filters.status or filters.q %} (filtrováno){% endif %} · verze {{ version }}{% if commit %} @ {{ commit }}{% endif %}</p>
+<p class="sub">upstream {{ upstream }} · {{ total | num }} záznamů{% if filters.since or filters.model or filters.provider or filters.placement or filters.key_name or filters.user or filters.status or filters.q %} (filtrováno){% endif %} · verze {{ version }}{% if commit %} @ {{ commit }}{% endif %}</p>
 
 <div class="stats">
   <div class="stat"><b>{{ day.total.n | num }}</b><span>dotazů za 24 h</span></div>
@@ -34,6 +34,7 @@
     {% for opt, label in [('1h','poslední hodina'),('24h','24 hodin'),('7d','7 dní'),('30d','30 dní')] %}
     <option value="{{ opt }}" {{ 'selected' if opt == filters.since }}>{{ label }}</option>{% endfor %}
   </select>
+  <input name="user" placeholder="uživatel (Open WebUI)" value="{{ filters.user }}" size="16">
   <input name="q" placeholder="hledat v textu" value="{{ filters.q }}" size="18">
   <button>Filtrovat</button>
   {% if base_qs %}<a href="/ui">zrušit</a>{% endif %}
@@ -49,7 +50,7 @@
   <td>{{ r.ts | ts }}
   <td>{{ r.provider or '—' }}
   <td>{{ r.model or '?' }}
-  <td>{{ r.key_name or (r.client_ip or '—') }}
+  <td>{{ r.key_name or (r.client_ip or '—') }}{% if r.client_user %} <span class="mute">· {{ r.client_user }}</span>{% endif %}
   <td class="{{ place }}">{{ place or '—' }}
   <td class="num">{{ r.vram_pct | fmt }}
   <td class="num">{{ r.prompt_tokens | num }}

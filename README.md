@@ -50,6 +50,27 @@ Open WebUI → Admin → Settings → Connections → Ollama API: `http://ollama
 Holé Ollama API klíč nevyžaduje (dá se zapnout v Nastavení, pak ho musí posílat i
 Open WebUI).
 
+## Kdo kolik spotřeboval
+
+Každá aplikace dostane vlastní klíč (GUI → API klíče, role `client`) a posílá ho
+jako `Authorization: Bearer opx_…`. Proxy klíč ověří, do logu zapíše jeho název a
+do Ollamy ho nepřeposílá. Stránka **Spotřeba** (`/ui/usage`, API
+`/mgmt/v1/stats` → `by_key_model`) pak ukáže tokeny a cenu po aplikacích a modelech.
+
+- **Open WebUI**: Admin → Settings → Connections → Ollama API → u adresy proxy
+  vyplň klíč do pole „Key“. Open WebUI ho posílá jako `Authorization: Bearer` na
+  všechna volání Ollamy včetně `/api/tags`. U OpenAI API připojení
+  (`/providers/openai/v1`) je klíč povinný vždy.
+- **Kdo se v Open WebUI ptal**: nastav kontejneru Open WebUI
+  `ENABLE_FORWARD_USER_INFO_HEADERS=true`. Pak posílá hlavičky
+  `X-OpenWebUI-User-Name/-Id/-Email/-Role`; proxy si jméno uloží (`client_user`)
+  a Spotřeba ho rozepíše po uživatelích. (Má-li Open WebUI nastavený
+  `FORWARD_USER_INFO_HEADER_JWT_SECRET`, posílá místo nich podepsaný JWT, který
+  proxy zatím nečte.) Bez klíče se dotazy počítají jako „bez klíče“ (v logu
+  s IP adresou).
+- **Vynucení klíče** pro holé Ollama API zapni v Nastavení až po ověření, že
+  Open WebUI s vyplněným klíčem načte modely. Jinak by přestal fungovat.
+
 ### Komerční API přes proxy
 
 1. GUI → Poskytovatelé → přidat (slug `openai`, typ OpenAI-kompatibilní,
@@ -124,7 +145,7 @@ id, ts, endpoint, model, status, prompt_tokens, completion_tokens,
 total_duration_ms, eval_duration_ms, tokens_per_sec, wall_time_ms,
 request_json, response_text,
 placement, vram_pct, loaded_model, load1, load5, mem_avail_pct, concurrent,
-provider, key_name, client_ip, cost_usd, error
+provider, key_name, client_ip, cost_usd, error, client_user
 ```
 
 Dále `users`, `api_keys` (jen hash klíče), `providers` (klíč poskytovatele

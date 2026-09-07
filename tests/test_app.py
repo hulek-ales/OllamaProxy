@@ -184,7 +184,8 @@ def test_provider_update_keeps_key(admin):
 
 def test_ui_pages_render(admin):
     for path in ("/ui", "/ui/providers", "/ui/keys", "/ui/settings", "/ui/r/1", "/ui/r/999999",
-                 "/ui?provider=openai&since=24h&status=error"):
+                 "/ui?provider=openai&since=24h&status=error", "/ui/usage", "/ui/usage?since=24h",
+                 "/ui/usage?since=", "/ui/usage?since=nesmysl"):
         r = admin.get(path)
         assert r.status_code == 200, path
     assert "gemma4:12b" in admin.get("/ui").text
@@ -210,6 +211,28 @@ def test_ui_forms(admin):
     assert db.get_user_by_name("admin")["must_change_pw"] == 0
     assert "výchozím heslem" not in admin.get("/ui").text
     db.update_password(db.get_user_by_name("admin")["id"], __import__("ollamaproxy.auth").auth.hash_password("admin123"))
+
+
+def test_usage_per_key_model_and_webui_user(admin, upstream):
+    # Open WebUI s ENABLE_FORWARD_USER_INFO_HEADERS=true posílá jméno uživatele v hlavičce,
+    # URL-encoded (quote(name, safe=" ")) — proxy ho dekóduje
+    r = admin.post("/api/chat", json={"model": "gemma4:12b", "messages": [{"role": "user", "content": "kdo"}]},
+                   headers={"X-OpenWebUI-User-Name": "Ale%C5%A1", "X-OpenWebUI-User-Id": "u1"})
+    assert r.status_code == 200
+    rows, _ = db.query_requests({"user": "Ale"})
+    assert rows and rows[0]["client_user"] == "Aleš" and rows[0]["key_name"] == "admin"
+    # hlavičky uživatele se do Ollamy přeposílají beze změny (nejsou to naše klíče)
+    assert upstream.calls[-1].headers.get("x-openwebui-user-name") == "Ale%C5%A1"
+
+    st = admin.get("/mgmt/v1/stats?since=24h").json()
+    pair = [x for x in st["by_key_model"] if x["key_name"] == "admin" and x["model"] == "gemma4:12b"]
+    assert pair and pair[0]["n"] >= 1 and pair[0]["prompt_tokens"] >= 12
+    assert [x for x in st["by_user"] if x["key"] == "Aleš"]
+    assert admin.get("/mgmt/v1/requests?user=Ale").json()["total"] >= 1
+
+    page = admin.get("/ui/usage").text
+    assert "gemma4:12b" in page and "Aleš" in page and "Podle aplikace a modelu" in page
+    assert "Aleš" in admin.get("/ui?user=Ale").text
 
 
 def test_healthz_open(client):

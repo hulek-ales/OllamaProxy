@@ -160,6 +160,7 @@ async def ui_list(request: Request):
         "provider": qs.get("provider", "").strip(),
         "placement": qs.get("placement", "").strip(),
         "key_name": qs.get("key", "").strip(),
+        "user": qs.get("user", "").strip(),
         "status": qs.get("status", "").strip(),
         "since": qs.get("since", "").strip(),
         "q": qs.get("q", "").strip(),
@@ -169,12 +170,24 @@ async def ui_list(request: Request):
     week = db.stats("7d")
     base_qs = "&".join(k + "=" + quote(v) for k, v in {
         "model": filters["model"], "provider": filters["provider"], "placement": filters["placement"],
-        "key": filters["key_name"], "status": filters["status"], "since": filters["since"],
-        "q": filters["q"]}.items() if v)
+        "key": filters["key_name"], "user": filters["user"], "status": filters["status"],
+        "since": filters["since"], "q": filters["q"]}.items() if v)
     return render(request, "list.html", user, rows=rows, total=total, page=page_no, per=per,
                   filters=filters, day=day, week=week, base_qs=base_qs,
                   providers=["ollama"] + [p["slug"] for p in db.list_providers()],
                   keys=db.distinct("key_name"))
+
+
+@router.get("/usage", response_class=HTMLResponse)
+async def ui_usage(request: Request):
+    """Spotřeba tokenů po aplikacích (klíčích), modelech a uživatelích Open WebUI."""
+    user = current_user(request)
+    if not user:
+        return login_redirect(request)
+    since = request.query_params.get("since", "7d").strip()
+    if since not in ("24h", "7d", "30d", ""):
+        since = "7d"
+    return render(request, "usage.html", user, s=db.stats(since or None), since=since)
 
 
 @router.get("/r/{rid}", response_class=HTMLResponse)

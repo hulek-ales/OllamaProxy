@@ -9,6 +9,7 @@ Cesty:
 import json
 import re
 import time
+from urllib.parse import unquote
 
 import httpx
 from fastapi import APIRouter, Request
@@ -45,6 +46,16 @@ def client_ip(request: Request):
     if xff:
         return xff.split(",")[0].strip()
     return request.client.host if request.client else None
+
+
+def client_user(request: Request):
+    """Uživatel z Open WebUI (ENABLE_FORWARD_USER_INFO_HEADERS=true): jméno, jinak e-mail.
+    Jméno posílá Open WebUI URL-encoded (`quote(name, safe=" ")`), proto unquote."""
+    for h in ("x-openwebui-user-name", "x-openwebui-user-email"):
+        v = request.headers.get(h)
+        if v:
+            return unquote(v).strip()[:120]
+    return None
 
 
 def _unauthorized(msg="missing or invalid proxy API key"):
@@ -93,6 +104,7 @@ async def forward(request: Request, url: str, headers: dict, body: bytes, *,
         "provider": provider,
         "key_name": principal.name if principal is not None else None,
         "client_ip": client_ip(request),
+        "client_user": client_user(request),
         "request_json": json.dumps(req_obj, ensure_ascii=False) if (should_log and log_bodies) else None,
     }
 

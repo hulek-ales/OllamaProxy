@@ -12,6 +12,7 @@
   <div>endpoint</div><div>{{ row.endpoint }}</div>
   <div>model</div><div>{{ row.model or '—' }}</div>
   <div>klient</div><div>{{ row.key_name or '—' }}{% if row.client_ip %} <span class="mute">({{ row.client_ip }})</span>{% endif %}</div>
+  {% if row.client_user %}<div>uživatel</div><div>{{ row.client_user }} <span class="mute">(z hlavičky Open WebUI)</span></div>{% endif %}
   <div>HTTP stav</div><div class="{{ 'err' if (row.status or 0) >= 400 }}">{{ row.status | fmt }}</div>
   {% if row.error %}<div>chyba</div><div class="err">{{ row.error }}</div>{% endif %}
   <div>vstupní tokeny</div><div>{{ row.prompt_tokens | num }}</div>

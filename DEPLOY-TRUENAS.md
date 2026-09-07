@@ -54,11 +54,16 @@ Start sleduj v logu appky: `[init] klonuji …`, `[run] start proxy na :11435
 1. `http://172.24.1.111:11435/ui` → `admin` + heslo.
 2. Nastavení → Změna hesla (pokud jsi nechal výchozí).
 3. API klíče → vytvořit klíč **claude-debug** s rolí `admin` (pro ladění
-   z venku) a klíče pro jednotlivé aplikace s rolí `client`.
+   z venku) a klíče pro jednotlivé aplikace s rolí `client` (např. `open-webui`,
+   `kucharka`). Podle klíče stránka **Spotřeba** ukáže tokeny a cenu po
+   aplikacích a modelech.
 4. Poskytovatelé → přidat komerční API, „Otestovat“.
 5. Open WebUI → Admin → Settings → Connections: Ollama API zůstává
-   `http://ollama-proxy:11435`; pro komerční modely přidej OpenAI API
+   `http://ollama-proxy:11435`, do pole „Key“ u něj vlož klíč `open-webui`;
+   pro komerční modely přidej OpenAI API
    `http://ollama-proxy:11435/providers/openai/v1` s proxy klíčem.
+   Aby bylo vidět i kdo se v Open WebUI ptal, přidej jeho appce env
+   `ENABLE_FORWARD_USER_INFO_HEADERS: 'true'` (posílá `X-OpenWebUI-User-Name`).
 
 ## 4. Aktualizace z Gitu
 
@@ -92,6 +97,23 @@ utne spojení po 100 s, takže dlouhé generování streamuj (`stream: true`).
 | `UPDATE_ON_START` | `true` | `git pull` při startu |
 | `REPO_URL` / `REPO_BRANCH` | repo / `main` | odkud se kód tahá |
 | `PROXY_PORT` | `11435` | port uvicornu (musí sedět s `ports:`) |
+
+## Když appky nenastartují: `network ollamaNet declared as external, but could not be found`
+
+Síť `ollamaNet` mají obě appky (Open WebUI i proxy) jako `external`, takže ji
+žádná z nich nevytvoří. Zmizí typicky tehdy, když se smaže nebo přepíše appka,
+která ji původně založila, a Open WebUI je v tu chvíli zastavené (např. při
+updatu) — compose při `down` odstraní síť bez připojených kontejnerů. Řešení:
+
+```bash
+sudo docker network create ollamaNet
+```
+
+a pak Apps → **Start** u `open-webui` i `ollamaproxy`. Kontrola, že na síti oba visí:
+
+```bash
+sudo docker network inspect ollamaNet --format '{{range .Containers}}{{.Name}} {{end}}'
+```
 
 ## Zálohování a diagnostika
 
