@@ -6,9 +6,9 @@ Autentizace: `Authorization: Bearer opx_…` (klíč z GUI → API klíče) nebo
 | metoda | cesta | role | popis |
 |---|---|---|---|
 | GET | `/health` | client | load, RAM, umístění modelu v Ollamě, souběh, verze, commit, velikost DB |
-| GET | `/requests` | client | log; `limit` (≤500), `offset`, `model`, `provider`, `placement`, `status` (číslo nebo `error`), `key`, `since` (`1h`/`24h`/`7d`/ISO), `q` (fulltext), `bodies=1` (i texty) |
+| GET | `/requests` | client | log; `limit` (≤500), `offset`, `model`, `provider`, `placement`, `status` (číslo nebo `error`), `key`, `user` (uživatel Open WebUI), `since` (`1h`/`24h`/`7d`/ISO), `q` (fulltext), `bodies=1` (i texty) |
 | GET | `/requests/{id}` | client | jeden záznam včetně textů |
-| GET | `/stats?since=24h` | client | součty a průměry: celkem, po poskytovatelích, modelech, umístění, klíčích |
+| GET | `/stats?since=24h` | client | součty a průměry: celkem (`total`), `by_provider`, `by_model`, `by_placement`, `by_key`, `by_user` (hlavička Open WebUI), `by_key_model` (spotřeba aplikace na každém modelu) |
 | GET | `/models` | client | modely dostupné přes proxy (Ollama + zapnutí poskytovatelé) a jejich `base_url` |
 | GET | `/providers` | client | poskytovatelé (klíč jen maskovaný) |
 | POST | `/providers` | admin | `{slug, name, kind, base_url, api_key, pricing, inject_usage, enabled}` |

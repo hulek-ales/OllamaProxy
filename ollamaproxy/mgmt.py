@@ -72,13 +72,13 @@ async def health(request: Request):
 async def list_requests(request: Request, limit: int = 100, offset: int = 0,
                         model: Optional[str] = None, provider: Optional[str] = None,
                         placement: Optional[str] = None, status: Optional[str] = None,
-                        key: Optional[str] = None, since: Optional[str] = None,
-                        q: Optional[str] = None, bodies: int = 0):
+                        key: Optional[str] = None, user: Optional[str] = None,
+                        since: Optional[str] = None, q: Optional[str] = None, bodies: int = 0):
     """Seznam dotazů, nejnovější první. `since` = 24h / 7d / ISO datum, `status` = číslo nebo `error`."""
     require(request)
     limit = max(1, min(limit, 500))
     filters = {"model": model, "provider": provider, "placement": placement,
-               "status": status, "key_name": key, "since": since, "q": q}
+               "status": status, "key_name": key, "user": user, "since": since, "q": q}
     rows, total = db.query_requests(filters, limit=limit, offset=max(0, offset),
                                     with_bodies=bool(bodies))
     return {"total": total, "limit": limit, "offset": offset, "items": rows}
@@ -95,7 +95,8 @@ async def get_request(rid: int, request: Request):
 
 @router.get("/stats")
 async def stats(request: Request, since: Optional[str] = "24h"):
-    """Součty a průměry: celkem a po poskytovatelích, modelech, umístění a klíčích."""
+    """Součty a průměry: celkem, po poskytovatelích, modelech, umístění, klíčích, uživatelích
+    Open WebUI a kombinaci klíč × model (`by_key_model`)."""
     require(request)
     return db.stats(since)
 

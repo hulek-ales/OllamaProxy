@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Spotřeba{% endblock %}
+{% block content %}
+<h1>Spotřeba tokenů</h1>
+<p class="sub">Která aplikace (API klíč) kolik spotřebovala na kterém modelu. Dotazy bez klíče jsou pod „bez klíče“.</p>
+
+<form class="bar" method="get" action="/ui/usage">
+  <select name="since" onchange="this.form.submit()">
+    {% for opt, label in [('24h','24 hodin'),('7d','7 dní'),('30d','30 dní'),('','od začátku')] %}
+    <option value="{{ opt }}" {{ 'selected' if opt == since }}>{{ label }}</option>{% endfor %}
+  </select>
+  <noscript><button>Zobrazit</button></noscript>
+</form>
+
+<div class="stats">
+  <div class="stat"><b>{{ s.total.n | num }}</b><span>dotazů</span></div>
+  <div class="stat"><b>{{ s.total.prompt_tokens | num }}</b><span>vstupních tokenů</span></div>
+  <div class="stat"><b>{{ s.total.completion_tokens | num }}</b><span>výstupních tokenů</span></div>
+  <div class="stat"><b>{{ (s.total.prompt_tokens + s.total.completion_tokens) | num }}</b><span>celkem tokenů</span></div>
+  {% if s.total.cost_usd %}<div class="stat"><b>{{ s.total.cost_usd | money }}</b><span>útrata</span></div>{% endif %}
+  <div class="stat"><b class="{{ 'err' if s.total.errors else '' }}">{{ s.total.errors | num }}</b><span>chyb</span></div>
+</div>
+
+<h2>Podle aplikace a modelu</h2>
+<div class="tblwrap">
+<table>
+<tr><th>aplikace (klíč)<th>zdroj<th>model<th class="num">dotazů<th class="num">vstup<th class="num">výstup<th class="num">celkem<th class="num">cena<th class="num">tok/s<th class="num">chyb</tr>
+{% for r in s.by_key_model %}
+<tr>
+  <td>{% if r.key_name %}<a href="/ui?key={{ r.key_name | urlencode }}{% if since %}&since={{ since }}{% endif %}">{{ r.key_name }}</a>{% else %}<span class="mute">bez klíče</span>{% endif %}
+  <td>{{ r.provider or '—' }}
+  <td><a href="/ui?model={{ (r.model or '') | urlencode }}{% if r.key_name %}&key={{ r.key_name | urlencode }}{% endif %}{% if since %}&since={{ since }}{% endif %}">{{ r.model or '?' }}</a>
+  <td class="num">{{ r.n | num }}
+  <td class="num">{{ r.prompt_tokens | num }}
+  <td class="num">{{ r.completion_tokens | num }}
+  <td class="num">{{ (r.prompt_tokens + r.completion_tokens) | num }}
+  <td class="num">{{ r.cost_usd | money }}
+  <td class="num">{{ r.tokens_per_sec | fmt }}
+  <td class="num {{ 'err' if r.errors }}">{{ r.errors | num }}
+</tr>
+{% else %}
+<tr><td colspan="10">Za zvolené období nic není.</td></tr>
+{% endfor %}
+</table>
+</div>
+
+<h2>Podle aplikace</h2>
+<div class="tblwrap">
+<table>
+<tr><th>aplikace (klíč)<th class="num">dotazů<th class="num">vstup<th class="num">výstup<th class="num">celkem<th class="num">cena<th class="num">chyb</tr>
+{% for r in s.by_key %}
+<tr>
+  <td>{% if r.key %}{{ r.key }}{% else %}<span class="mute">bez klíče</span>{% endif %}
+  <td class="num">{{ r.n | num }}
+  <td class="num">{{ r.prompt_tokens | num }}
+  <td class="num">{{ r.completion_tokens | num }}
+  <td class="num">{{ (r.prompt_tokens + r.completion_tokens) | num }}
+  <td class="num">{{ r.cost_usd | money }}
+  <td class="num {{ 'err' if r.errors }}">{{ r.errors | num }}
+</tr>
+{% else %}
+<tr><td colspan="7">Za zvolené období nic není.</td></tr>
+{% endfor %}
+</table>
+</div>
+
+<h2>Podle uživatele Open WebUI</h2>
+{% set users = s.by_user | selectattr('key') | list %}
+{% if users %}
+<div class="tblwrap">
+<table>
+<tr><th>uživatel<th class="num">dotazů<th class="num">vstup<th class="num">výstup<th class="num">celkem<th class="num">cena<th class="num">chyb</tr>
+{% for r in users %}
+<tr>
+  <td><a href="/ui?user={{ r.key | urlencode }}{% if since %}&since={{ since }}{% endif %}">{{ r.key }}</a>
+  <td class="num">{{ r.n | num }}
+  <td class="num">{{ r.prompt_tokens | num }}
+  <td class="num">{{ r.completion_tokens | num }}
+  <td class="num">{{ (r.prompt_tokens + r.completion_tokens) | num }}
+  <td class="num">{{ r.cost_usd | money }}
+  <td class="num {{ 'err' if r.errors }}">{{ r.errors | num }}
+</tr>
+{% endfor %}
+</table>
+</div>
+{% else %}
+<p class="help">Zatím žádný dotaz nenesl jméno uživatele. Open WebUI ho posílá v hlavičce
+<code>X-OpenWebUI-User-Name</code>, když má nastaveno <code>ENABLE_FORWARD_USER_INFO_HEADERS=true</code>
+(env proměnná kontejneru Open WebUI). Pak je vidět nejen aplikace, ale i kdo se v ní ptal.</p>
+{% endif %}
+{% endblock %}

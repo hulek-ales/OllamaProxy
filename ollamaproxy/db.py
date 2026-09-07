@@ -86,13 +86,14 @@ EXTRA_COLUMNS = [
     ("client_ip", "TEXT"),
     ("cost_usd", "REAL"),
     ("error", "TEXT"),
+    ("client_user", "TEXT"),   # uživatel z hlavičky X-OpenWebUI-User-Name (Open WebUI)
 ]
 
 LIGHT_COLS = (
     "id, ts, endpoint, model, status, prompt_tokens, completion_tokens, "
     "total_duration_ms, eval_duration_ms, tokens_per_sec, wall_time_ms, "
     "placement, vram_pct, loaded_model, load1, load5, mem_avail_pct, concurrent, "
-    "provider, key_name, client_ip, cost_usd, error"
+    "provider, key_name, client_ip, cost_usd, error, client_user"
 )
 
 SETTING_DEFAULTS = {
@@ -376,6 +377,9 @@ class Database:
         if filters.get("key_name"):
             where.append("key_name LIKE ?")
             args.append("%" + filters["key_name"] + "%")
+        if filters.get("user"):
+            where.append("client_user LIKE ?")
+            args.append("%" + filters["user"] + "%")
         if filters.get("status") is not None and filters.get("status") != "":
             if str(filters["status"]) == "error":
                 where.append("(status >= 400 OR error IS NOT NULL)")
@@ -419,10 +423,15 @@ class Database:
         with self.lock:
             total = dict(self.conn.execute("SELECT " + agg + " FROM requests" + clause, args).fetchone())
             groups = {}
-            for col in ("provider", "model", "placement", "key_name"):
+            for col in ("provider", "model", "placement", "key_name", "client_user"):
                 groups[col] = _rows(self.conn.execute(
                     "SELECT " + col + " AS key, " + agg + " FROM requests" + clause
                     + " GROUP BY " + col + " ORDER BY n DESC", args))
+            # spotřeba aplikace (klíč) na jednotlivých modelech
+            by_key_model = _rows(self.conn.execute(
+                "SELECT key_name, provider, model, " + agg + " FROM requests" + clause
+                + " GROUP BY key_name, provider, model"
+                + " ORDER BY key_name IS NULL, key_name, prompt_tokens + completion_tokens DESC", args))
         return {
             "since": since_iso,
             "total": total,
@@ -430,6 +439,8 @@ class Database:
             "by_model": groups["model"],
             "by_placement": groups["placement"],
             "by_key": groups["key_name"],
+            "by_user": groups["client_user"],
+            "by_key_model": by_key_model,
         }
 
     def distinct(self, col: str) -> list:
