@@ -115,7 +115,9 @@ a nastavuje se v GUI nebo přes `/mgmt/v1`.
 ## Databáze
 
 Tabulka `requests` je kompatibilní s původní verzí (nové sloupce se přidají
-`ALTER TABLE` při startu, stará data zůstanou):
+`ALTER TABLE` při startu, stará data zůstanou). Log úplně první proxy (tabulka
+`ollama_requests` s UUID klíčem) se při startu jednorázově překopíruje do
+`requests` a stará tabulka se přejmenuje na `ollama_requests_migrated`:
 
 ```
 id, ts, endpoint, model, status, prompt_tokens, completion_tokens,

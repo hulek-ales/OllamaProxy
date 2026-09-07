@@ -110,6 +110,22 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# tabulka původní proxy (v1): UUID klíč, naivní UTC čas s mikrosekundami
+LEGACY_TABLE = "ollama_requests"
+LEGACY_TABLE_DONE = "ollama_requests_migrated"
+
+
+def legacy_ts(value):
+    """ts z v1 ('2026-09-07T11:02:45.123456', naivní UTC) → formát now_iso()."""
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
 def parse_since(value):
     """'24h' / '7d' / '30m' / ISO datum → ISO řetězec ve formátu, v jakém se ukládá ts."""
     if not value:
@@ -155,9 +171,44 @@ class Database:
             except sqlite3.OperationalError:
                 pass  # sloupec už existuje
         self.conn.commit()
+        self.migrate_legacy()
         self._settings = {r["key"]: r["value"] for r in self.conn.execute("SELECT key, value FROM settings")}
         if not self._settings.get("secret_key"):
             self.set_setting("secret_key", secrets.token_hex(32))
+
+    def migrate_legacy(self) -> int:
+        """Jednorázově překopíruje log původní proxy (tabulka `ollama_requests`)
+        do `requests`. Stará tabulka se pak přejmenuje, takže se migrace při
+        dalším startu neopakuje a původní data zůstanou v souboru."""
+        found = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (LEGACY_TABLE,)
+        ).fetchone()
+        if found is None:
+            return 0
+        cols = ["ts", "client_ip", "endpoint", "model", "request_json", "response_text",
+                "prompt_tokens", "completion_tokens", "total_duration_ms",
+                "eval_duration_ms", "tokens_per_sec", "wall_time_ms", "provider"]
+        sql = ("INSERT INTO requests (" + ", ".join(cols) + ") VALUES ("
+               + ", ".join("?" for _ in cols) + ")")
+        try:
+            old = [dict(r) for r in self.conn.execute(
+                "SELECT * FROM " + LEGACY_TABLE + " ORDER BY ts").fetchall()]
+            values = []
+            for r in old:
+                row = {c: r.get(c) for c in cols}
+                row["ts"] = legacy_ts(r.get("ts"))
+                row["provider"] = "ollama"
+                values.append([row[c] for c in cols])
+            self.conn.executemany(sql, values)
+            self.conn.execute("ALTER TABLE " + LEGACY_TABLE + " RENAME TO " + LEGACY_TABLE_DONE)
+            self.conn.commit()
+        except sqlite3.Error as exc:
+            self.conn.rollback()
+            print("[db] migrace " + LEGACY_TABLE + " selhala: " + str(exc), flush=True)
+            return 0
+        print("[db] migrováno " + str(len(values)) + " záznamů z " + LEGACY_TABLE
+              + " do requests (stará tabulka přejmenována na " + LEGACY_TABLE_DONE + ")", flush=True)
+        return len(values)
 
     def close(self):
         if self.conn is not None:

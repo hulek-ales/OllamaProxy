@@ -19,9 +19,11 @@ tahle appka na **jednom portu 11435** — GUI má vlastní přihlášení, Caddy
 není potřeba.
 
 1. Apps → stará ollama-proxy appka → **Stop**, pak **Delete**. Když se TrueNAS
-   zeptá na volumes, klidně je nech smazat (stará data nepotřebujeme). Pokud je
-   necháš, nová appka použije stejný název `ollamaproxy_data` a data si vezme —
-   schéma je kompatibilní.
+   zeptá na volumes, můžeš je nechat smazat (začne se s prázdným logem). Pokud
+   je necháš, nová appka použije stejný název `ollamaproxy_data` a historii si
+   vezme: původní tabulku `ollama_requests` při prvním startu jednorázově
+   překopíruje do `requests` (v logu `[db] migrováno N záznamů …`) a starou
+   přejmenuje na `ollama_requests_migrated`, takže v souboru zůstane.
 2. Ověř, že síť zůstala (visí na ní Open WebUI):
    ```bash
    docker network inspect ollamaNet --format '{{range .Containers}}{{.Name}} {{end}}'
