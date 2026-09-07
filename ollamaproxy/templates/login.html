@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Přihlášení{% endblock %}
+{% block content %}
+<div class="panel" style="max-width:380px;margin:60px auto 0">
+  <h1>Ollama proxy</h1>
+  <p class="sub">přihlášení do GUI</p>
+  <form method="post" action="/ui/login">
+    <input type="hidden" name="next" value="{{ next }}">
+    <div class="field"><label for="username">Uživatel</label><input type="text" id="username" name="username" autofocus autocomplete="username"></div>
+    <div class="field"><label for="password">Heslo</label><input type="password" id="password" name="password" autocomplete="current-password"></div>
+    <button>Přihlásit</button>
+  </form>
+</div>
+{% endblock %}

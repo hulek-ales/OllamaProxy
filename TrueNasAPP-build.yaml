@@ -1,0 +1,53 @@
+# Varianta bez GHCR: image se postaví přímo na TrueNASu (dockerfile_inline).
+# Pozor na TrueNAS template engine — v YAML nesmí být bare složené závorky,
+# proto se nic neinterpoluje a entrypoint se bere z repa při buildu.
+# Po změně Dockerfile/entrypointu v repu je nutné appku smazat a nainstalovat
+# znovu (rebuild); běžné změny kódu se stahují restartem (git pull).
+services:
+  ollama-proxy:
+    build:
+      dockerfile_inline: |
+        FROM python:3.12-slim
+        RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates && apt-get clean && rm -rf /var/lib/apt/lists/*
+        RUN git clone --depth 1 https://github.com/hulek-ales/OllamaProxy.git /tmp/r && pip install --no-cache-dir -r /tmp/r/requirements.txt && mkdir -p /app/src /data && sha256sum /tmp/r/requirements.txt | cut -c1-16 > /app/.req-stamp && cp /tmp/r/docker/entrypoint.sh /entrypoint.sh && chmod +x /entrypoint.sh && rm -rf /tmp/r
+        ENV PYTHONUNBUFFERED=1
+        WORKDIR /app/src
+        EXPOSE 11435
+        HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 CMD curl -fsS http://localhost:11435/healthz > /dev/null || exit 1
+        ENTRYPOINT ["/entrypoint.sh"]
+      tags:
+        - ollama-proxy:latest
+    container_name: ollama-logging-proxy
+    restart: unless-stopped
+    ports:
+      - '11435:11435'
+    environment:
+      OLLAMA_UPSTREAM: http://open-webui:11434
+      OLLAMA_LOG_DB: /data/ollama_log.db
+      OLLAMA_LOG_BODIES: '1'
+      PROXY_PORT: '11435'
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: ''
+      UPDATE_ON_START: 'true'
+      REPO_URL: https://github.com/hulek-ales/OllamaProxy.git
+      REPO_BRANCH: main
+    networks:
+      - ollamaNet
+    volumes:
+      - type: volume
+        source: proxy-data
+        target: /data
+      - type: volume
+        source: proxy-code
+        target: /app/src
+
+networks:
+  ollamaNet:
+    name: ollamaNet
+    external: true
+
+volumes:
+  proxy-data:
+    name: ollamaproxy_data
+  proxy-code:
+    name: ollamaproxy_code

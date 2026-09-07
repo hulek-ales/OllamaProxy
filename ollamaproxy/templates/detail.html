@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Záznam {{ rid }}{% endblock %}
+{% block content %}
+{% if row is none %}
+<h1>Záznam {{ rid }} neexistuje</h1><p><a href="/ui">Zpět na seznam</a></p>
+{% else %}
+<h1>Záznam {{ rid }}</h1>
+<p class="sub"><a href="/ui">&larr; zpět na seznam</a></p>
+<div class="kv">
+  <div>čas</div><div>{{ row.ts | ts }}</div>
+  <div>zdroj</div><div>{{ row.provider or '—' }}</div>
+  <div>endpoint</div><div>{{ row.endpoint }}</div>
+  <div>model</div><div>{{ row.model or '—' }}</div>
+  <div>klient</div><div>{{ row.key_name or '—' }}{% if row.client_ip %} <span class="mute">({{ row.client_ip }})</span>{% endif %}</div>
+  <div>HTTP stav</div><div class="{{ 'err' if (row.status or 0) >= 400 }}">{{ row.status | fmt }}</div>
+  {% if row.error %}<div>chyba</div><div class="err">{{ row.error }}</div>{% endif %}
+  <div>vstupní tokeny</div><div>{{ row.prompt_tokens | num }}</div>
+  <div>výstupní tokeny</div><div>{{ row.completion_tokens | num }}</div>
+  <div>tokens/s</div><div>{{ row.tokens_per_sec | fmt(2) }}</div>
+  <div>eval trvání ms</div><div>{{ row.eval_duration_ms | fmt(0) }}</div>
+  <div>celkové trvání ms</div><div>{{ row.total_duration_ms | fmt(0) }}</div>
+  <div>wall time ms</div><div>{{ row.wall_time_ms | fmt(0) }}</div>
+  {% if row.cost_usd is not none %}<div>cena</div><div>{{ row.cost_usd | money }}</div>{% endif %}
+  {% if row.provider == 'ollama' %}
+  <div>umístění modelu</div><div class="{{ row.placement or 'unknown' }}">{{ row.placement or '—' }}</div>
+  <div>model ve VRAM %</div><div>{{ row.vram_pct | fmt }}</div>
+  <div>načtené v Ollamě</div><div>{{ row.loaded_model or '—' }}</div>
+  {% endif %}
+  <div>load 1m / 5m</div><div>{{ row.load1 | fmt(2) }} / {{ row.load5 | fmt(2) }}</div>
+  <div>volná RAM %</div><div>{{ row.mem_avail_pct | fmt }}</div>
+  <div>souběžných dotazů</div><div>{{ row.concurrent | fmt }}</div>
+</div>
+{% if request_pretty %}<h2>Dotaz</h2><pre>{{ request_pretty }}</pre>{% endif %}
+{% if row.response_text %}<h2>Odpověď</h2><pre>{{ row.response_text }}</pre>{% endif %}
+{% endif %}
+{% endblock %}

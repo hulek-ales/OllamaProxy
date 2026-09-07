@@ -1,0 +1,45 @@
+# Compose pro TrueNAS SCALE → Apps → Discover Apps → Install via YAML (custom app).
+# Vlož obsah do UI a uprav ADMIN_PASSWORD (UI nečte .env).
+# Image staví GitHub Actions do GHCR po pushi do main; balíček musí být public
+# (GitHub → Packages → ollamaproxy → Package settings → Change visibility).
+# Nechceš-li GHCR, použij TrueNasAPP-build.yaml (staví image přímo na NASu).
+services:
+  ollama-proxy:
+    image: ghcr.io/hulek-ales/ollamaproxy:latest
+    pull_policy: always
+    container_name: ollama-logging-proxy
+    restart: unless-stopped
+    ports:
+      - '11435:11435'
+    environment:
+      # Ollama vestavěná v kontejneru Open WebUI (na síti ollamaNet)
+      OLLAMA_UPSTREAM: http://open-webui:11434
+      OLLAMA_LOG_DB: /data/ollama_log.db
+      OLLAMA_LOG_BODIES: '1'
+      ADMIN_USERNAME: admin
+      # Nastav! Jinak se založí admin s heslem admin123 (GUI ho pak chce změnit).
+      ADMIN_PASSWORD: ''
+      UPDATE_ON_START: 'true'
+      REPO_URL: https://github.com/hulek-ales/OllamaProxy.git
+      REPO_BRANCH: main
+    networks:
+      - ollamaNet
+    volumes:
+      - type: volume
+        source: proxy-data
+        target: /data
+      - type: volume
+        source: proxy-code
+        target: /app/src
+
+networks:
+  ollamaNet:
+    name: ollamaNet
+    # síť už existuje (visí na ní Open WebUI); kdyby ne: docker network create ollamaNet
+    external: true
+
+volumes:
+  proxy-data:
+    name: ollamaproxy_data
+  proxy-code:
+    name: ollamaproxy_code

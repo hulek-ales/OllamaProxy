@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Poskytovatelé{% endblock %}
+{% block content %}
+<h1>Poskytovatelé</h1>
+<p class="sub">Komerční API a další servery, které proxy zastupuje. Aplikace se hlásí proxy klíčem, skutečný klíč poskytovatele zůstává tady.</p>
+
+<div class="tblwrap">
+<table>
+<tr><th>id<th>název<th>typ<th>upstream<th>klíč<th>base_url pro aplikace<th>ceník<th>stav<th></tr>
+<tr><td>ollama<td>lokální Ollama<td>ollama<td>{{ upstream }}<td>—<td><code>{{ root }}</code><td>—<td class="ok">vestavěné<td></tr>
+{% for p in rows %}
+<tr>
+  <td>{{ p.slug }}
+  <td>{{ p.name }}
+  <td>{{ p.kind }}
+  <td>{{ p.base_url }}
+  <td>{{ p.masked or '—' }}
+  <td><code>{{ p.client_base_url }}</code>
+  <td>{{ 'ano' if p.pricing_json and p.pricing_json != '{}' else '—' }}
+  <td class="{{ 'ok' if p.enabled else 'mute' }}">{{ 'zapnuto' if p.enabled else 'vypnuto' }}
+  <td class="wrap" style="white-space:nowrap">
+    <a href="/ui/providers?edit={{ p.slug }}">upravit</a> ·
+    <form method="post" action="/ui/providers/{{ p.slug }}/test" style="display:inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">otestovat</button></form> ·
+    <form method="post" action="/ui/providers/{{ p.slug }}/delete" style="display:inline" onsubmit="return confirm('Smazat poskytovatele {{ p.slug }}?')"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link danger">smazat</button></form>
+</tr>
+{% endfor %}
+</table>
+</div>
+
+<h2>{{ 'Upravit ' + edit.slug if edit else 'Přidat poskytovatele' }}</h2>
+<div class="panel" style="max-width:720px">
+<form method="post" action="/ui/providers">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="field"><label for="slug">Identifikátor (v URL: /providers/<b>slug</b>/…)</label>
+    <input type="text" id="slug" name="slug" value="{{ edit.slug if edit else '' }}" {{ 'readonly' if edit }} placeholder="openai, anthropic, openrouter…" pattern="[a-z0-9][a-z0-9_-]*"></div>
+  <div class="field"><label for="name">Název</label><input type="text" id="name" name="name" value="{{ edit.name if edit else '' }}"></div>
+  <div class="field"><label for="kind">Typ</label>
+    <select id="kind" name="kind">
+      {% for k in kinds %}<option value="{{ k }}" {{ 'selected' if edit and edit.kind == k }}>{{ kind_labels[k] }}</option>{% endfor %}
+    </select>
+    <div class="help">Typ určuje, jakou hlavičkou se klíč posílá dál a jak se čtou tokeny z odpovědi.</div></div>
+  <div class="field"><label for="base_url">Adresa upstreamu (bez /v1)</label>
+    <input type="text" id="base_url" name="base_url" value="{{ edit.base_url if edit else '' }}" placeholder="https://api.openai.com">
+    <div class="help">Výchozí: {% for k, v in defaults.items() %}{{ k }} = {{ v }}{{ ' · ' if not loop.last }}{% endfor %}. OpenRouter: https://openrouter.ai/api · Groq: https://api.groq.com/openai</div></div>
+  <div class="field"><label for="api_key">API klíč poskytovatele</label>
+    <input type="password" id="api_key" name="api_key" autocomplete="off" placeholder="{{ ('uloženo (' + edit.masked + ') — nech prázdné, když ho neměníš') if edit and edit.masked else 'sk-…' }}">
+    {% if edit and edit.masked %}<label style="display:inline"><input type="checkbox" name="clear_key" value="1"> smazat uložený klíč</label>{% endif %}</div>
+  <div class="field"><label for="pricing">Ceník (JSON, USD za 1 milion tokenů; nepovinné)</label>
+    <textarea id="pricing" name="pricing" placeholder='{"gpt-4o-mini": {"in": 0.15, "out": 0.60}}'>{{ edit.pricing_json if edit and edit.pricing_json != '{}' else '' }}</textarea>
+    <div class="help">Název modelu se páruje nejdelším prefixem, takže <code>gpt-4o-mini</code> pokryje i datované varianty.</div></div>
+  <div class="field"><label><input type="checkbox" name="inject_usage" value="1" {{ 'checked' if (not edit) or edit.inject_usage }}> do streamovaných OpenAI dotazů doplnit <code>stream_options.include_usage</code> (jinak OpenAI tokeny ve streamu neposílá)</label></div>
+  <div class="field"><label><input type="checkbox" name="enabled" value="1" {{ 'checked' if (not edit) or edit.enabled }}> zapnuto</label></div>
+  <button>{{ 'Uložit' if edit else 'Přidat' }}</button>
+  {% if edit %}<a href="/ui/providers" style="margin-left:12px">zrušit</a>{% endif %}
+</form>
+</div>
+
+<h2>Jak to použít v aplikaci</h2>
+<pre>from openai import OpenAI
+client = OpenAI(base_url="{{ root }}/providers/openai/v1", api_key="opx_…")   # proxy klíč, ne klíč OpenAI
+
+from anthropic import Anthropic
+client = Anthropic(base_url="{{ root }}/providers/anthropic", api_key="opx_…")
+
+# Open WebUI → Admin → Settings → Connections → OpenAI API:
+#   URL {{ root }}/providers/openai/v1   klíč opx_…</pre>
+{% endblock %}

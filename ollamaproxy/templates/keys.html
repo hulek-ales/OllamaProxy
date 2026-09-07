@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}API klíče{% endblock %}
+{% block content %}
+<h1>API klíče</h1>
+<p class="sub">Klíč <code>opx_…</code> posílá aplikace jako <code>Authorization: Bearer</code> (nebo <code>x-api-key</code>). Podle názvu klíče se dotazy poznají v logu.</p>
+
+{% if new_key %}
+<div class="flash good">
+  <b>Klíč „{{ new_key_name }}“ vytvořen.</b> Zobrazí se jen teď, ulož si ho:
+  <div class="keybox" style="margin-top:8px">{{ new_key }}</div>
+</div>
+{% endif %}
+
+<div class="tblwrap">
+<table>
+<tr><th>id<th>název<th>prefix<th>role<th>povolení poskytovatelé<th>vytvořen<th>naposledy použit<th></tr>
+{% for k in rows %}
+<tr>
+  <td>{{ k.id }}<td>{{ k.name }}<td>{{ k.prefix }}…<td>{{ k.role }}
+  <td>{{ k.allowed_providers or 'všichni' }}
+  <td>{{ k.created_at | ts }}<td>{{ k.last_used_at | ts if k.last_used_at else '—' }}
+  <td><form method="post" action="/ui/keys/{{ k.id }}/delete" onsubmit="return confirm('Smazat klíč {{ k.name }}?')"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link danger">smazat</button></form>
+</tr>
+{% else %}
+<tr><td colspan="8">Zatím žádný klíč.</td></tr>
+{% endfor %}
+</table>
+</div>
+
+<h2>Nový klíč</h2>
+<div class="panel" style="max-width:560px">
+<form method="post" action="/ui/keys">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="field"><label for="name">Název (aplikace / kdo ho používá)</label><input type="text" id="name" name="name" placeholder="claude-debug, kucharka, open-webui…" required></div>
+  <div class="field"><label for="role">Role</label>
+    <select id="role" name="role">
+      <option value="client">client — jen dotazy na modely (Ollama + poskytovatelé)</option>
+      <option value="admin">admin — navíc čtení logu a správa přes /mgmt/v1</option>
+    </select></div>
+  {% if providers %}
+  <div class="field"><label>Omezit na poskytovatele (nic = všichni)</label>
+    {% for p in providers %}<label style="display:inline-block;margin-right:14px"><input type="checkbox" name="allowed" value="{{ p }}"> {{ p }}</label>{% endfor %}
+  </div>
+  {% endif %}
+  <button>Vytvořit</button>
+</form>
+</div>
+
+<h2>Příklady</h2>
+<pre># čtení logu (role admin nebo client — client vidí log také)
+curl -H "Authorization: Bearer opx_…" "{{ root }}/mgmt/v1/requests?since=24h&limit=20"
+curl -H "Authorization: Bearer opx_…" "{{ root }}/mgmt/v1/stats?since=7d"
+curl -H "Authorization: Bearer opx_…" "{{ root }}/mgmt/v1/models"
+
+# dotaz na lokální Ollamu přes proxy
+curl -H "Authorization: Bearer opx_…" {{ root }}/api/chat -d '{"model":"gemma4:12b","messages":[{"role":"user","content":"ahoj"}],"stream":false}'
+
+# interaktivní dokumentace: {{ root }}/mgmt/docs</pre>
+{% endblock %}

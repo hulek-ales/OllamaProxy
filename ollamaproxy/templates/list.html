@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Log{% endblock %}
+{% block content %}
+<h1>Log dotazů</h1>
+<p class="sub">upstream {{ upstream }} · {{ total | num }} záznamů{% if filters.since or filters.model or filters.provider or filters.placement or filters.key_name or filters.status or filters.q %} (filtrováno){% endif %} · verze {{ version }}{% if commit %} @ {{ commit }}{% endif %}</p>
+
+<div class="stats">
+  <div class="stat"><b>{{ day.total.n | num }}</b><span>dotazů za 24 h</span></div>
+  <div class="stat"><b>{{ day.total.prompt_tokens | num }}</b><span>vstupních tokenů</span></div>
+  <div class="stat"><b>{{ day.total.completion_tokens | num }}</b><span>výstupních tokenů</span></div>
+  <div class="stat"><b>{{ day.total.tokens_per_sec | fmt }}</b><span>průměr tok/s</span></div>
+  <div class="stat"><b class="{{ 'err' if day.total.errors else '' }}">{{ day.total.errors | num }}</b><span>chyb</span></div>
+  {% if day.total.cost_usd %}<div class="stat"><b>{{ day.total.cost_usd | money }}</b><span>útrata za 24 h</span></div>{% endif %}
+  {% if week.total.cost_usd %}<div class="stat"><b>{{ week.total.cost_usd | money }}</b><span>útrata za 7 dní</span></div>{% endif %}
+  {% for r in week.by_placement if r.key %}
+  <div class="stat"><b class="{{ r.key }}">{{ r.tokens_per_sec | fmt }}</b><span>tok/s na {{ r.key }} · {{ r.n }}× za 7 dní</span></div>
+  {% endfor %}
+</div>
+
+<form class="bar" method="get" action="/ui">
+  <input name="model" placeholder="model" value="{{ filters.model }}" size="16">
+  <select name="provider"><option value="">všichni poskytovatelé</option>
+    {% for p in providers %}<option value="{{ p }}" {{ 'selected' if p == filters.provider }}>{{ p }}</option>{% endfor %}
+  </select>
+  <select name="placement"><option value="">umístění: vše</option>
+    {% for opt, label in [('gpu','gpu'),('split','split'),('cpu','cpu'),('none','nenačtené'),('unknown','neznámé')] %}
+    <option value="{{ opt }}" {{ 'selected' if opt == filters.placement }}>{{ label }}</option>{% endfor %}
+  </select>
+  <select name="key"><option value="">všichni klienti</option>
+    {% for k in keys %}<option value="{{ k }}" {{ 'selected' if k == filters.key_name }}>{{ k }}</option>{% endfor %}
+  </select>
+  <select name="status"><option value="">stav: vše</option><option value="error" {{ 'selected' if filters.status == 'error' }}>jen chyby</option></select>
+  <select name="since"><option value="">od začátku</option>
+    {% for opt, label in [('1h','poslední hodina'),('24h','24 hodin'),('7d','7 dní'),('30d','30 dní')] %}
+    <option value="{{ opt }}" {{ 'selected' if opt == filters.since }}>{{ label }}</option>{% endfor %}
+  </select>
+  <input name="q" placeholder="hledat v textu" value="{{ filters.q }}" size="18">
+  <button>Filtrovat</button>
+  {% if base_qs %}<a href="/ui">zrušit</a>{% endif %}
+</form>
+
+<div class="tblwrap">
+<table>
+<tr><th>id<th>čas<th>zdroj<th>model<th>klient<th>umístění<th class="num">VRAM %<th class="num">vstup<th class="num">výstup<th class="num">tok/s<th class="num">trvání s<th class="num">cena<th class="num">load<th class="num">RAM %<th class="num">souběh<th class="num">stav</tr>
+{% for r in rows %}
+{% set place = r.placement or ('' if r.provider != 'ollama' else 'unknown') %}
+<tr>
+  <td><a href="/ui/r/{{ r.id }}">{{ r.id }}</a>
+  <td>{{ r.ts | ts }}
+  <td>{{ r.provider or '—' }}
+  <td>{{ r.model or '?' }}
+  <td>{{ r.key_name or (r.client_ip or '—') }}
+  <td class="{{ place }}">{{ place or '—' }}
+  <td class="num">{{ r.vram_pct | fmt }}
+  <td class="num">{{ r.prompt_tokens | num }}
+  <td class="num">{{ r.completion_tokens | num }}
+  <td class="num {{ 'slow' if r.tokens_per_sec is not none and r.tokens_per_sec < 8 }}">{{ r.tokens_per_sec | fmt }}
+  <td class="num">{{ ((r.wall_time_ms or 0) / 1000) | fmt }}
+  <td class="num">{{ r.cost_usd | money }}
+  <td class="num">{{ r.load1 | fmt(2) }}
+  <td class="num">{{ r.mem_avail_pct | fmt }}
+  <td class="num">{{ r.concurrent | fmt }}
+  <td class="num {{ 'err' if r.error or (r.status or 0) >= 400 }}" title="{{ r.error or '' }}">{{ r.status | fmt }}
+</tr>
+{% else %}
+<tr><td colspan="16">Žádné záznamy. Pošli dotaz přes proxy.</td></tr>
+{% endfor %}
+</table>
+</div>
+
+<div class="nav">
+  {% if page > 1 %}<a href="/ui?page={{ page - 1 }}{% if base_qs %}&{{ base_qs }}{% endif %}">&larr; novější</a>{% endif %}
+  {% if (page * per) < total %}<a href="/ui?page={{ page + 1 }}{% if base_qs %}&{{ base_qs }}{% endif %}">starší &rarr;</a>{% endif %}
+</div>
+{% endblock %}

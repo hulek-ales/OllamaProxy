@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Nastavení{% endblock %}
+{% block content %}
+<h1>Nastavení</h1>
+<p class="sub">verze {{ version }}{% if commit %} · commit {{ commit }}{% endif %} · upstream {{ upstream }} · databáze {{ db_mb }} MB</p>
+
+<div class="grid">
+<div class="panel">
+<h2 style="margin-top:0">Proxy</h2>
+<form method="post" action="/ui/settings">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="field"><label for="retention_days">Mazat záznamy starší než (dní; 0 = nemazat)</label>
+    <input type="number" id="retention_days" name="retention_days" min="0" value="{{ settings.retention_days }}"></div>
+  <div class="field"><label><input type="checkbox" name="log_bodies" value="1" {{ 'checked' if settings.log_bodies == '1' }}> ukládat text dotazu a odpovědi</label>
+    <div class="help">Bez toho se loguje jen model, tokeny a časy.</div></div>
+  <div class="field"><label><input type="checkbox" name="ollama_require_key" value="1" {{ 'checked' if settings.ollama_require_key == '1' }}> vyžadovat proxy klíč i pro holé Ollama API</label>
+    <div class="help">Pozor: pak musí klíč posílat i Open WebUI (Connections → Ollama API → klíč). Komerční poskytovatelé klíč vyžadují vždy.</div></div>
+  <button>Uložit</button>
+</form>
+</div>
+
+<div class="panel">
+<h2 style="margin-top:0">Změna hesla ({{ user.username }})</h2>
+<form method="post" action="/ui/settings/password">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="field"><label for="current">Současné heslo</label><input type="password" id="current" name="current" autocomplete="current-password"></div>
+  <div class="field"><label for="new">Nové heslo (min. 8 znaků)</label><input type="password" id="new" name="new" autocomplete="new-password"></div>
+  <div class="field"><label for="again">Nové heslo znovu</label><input type="password" id="again" name="again" autocomplete="new-password"></div>
+  <button>Změnit heslo</button>
+</form>
+</div>
+</div>
+
+<h2>Aktualizace</h2>
+<p>Kód se při každém restartu kontejneru stáhne z Gitu (<code>git pull</code>). Nová verze = push do <code>main</code> a restart appky na TrueNASu.</p>
+<h2>Stav</h2>
+<pre>curl {{ root }}/healthz</pre>
+{% endblock %}

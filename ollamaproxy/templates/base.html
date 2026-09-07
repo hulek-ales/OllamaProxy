@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}Ollama proxy{% endblock %} · Ollama proxy</title>
+<style>
+:root{--bg:#12151a;--bg2:#0d1117;--panel:#161b22;--line:#21262d;--line2:#30363d;--fg:#c9d1d9;--fg2:#e6edf3;--mute:#6e7781;--link:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+header.top{display:flex;align-items:center;gap:22px;padding:10px 20px;border-bottom:1px solid var(--line);background:var(--bg2);flex-wrap:wrap}
+header .brand{color:var(--fg2);font-weight:600;letter-spacing:.02em}
+header nav{display:flex;gap:16px;flex:1}
+header nav a.active{color:var(--fg2);border-bottom:2px solid var(--link)}
+header .who{color:var(--mute);font-size:12px}
+main{max-width:1500px;margin:0 auto;padding:22px 20px 60px}
+h1{font-size:17px;font-weight:600;letter-spacing:.02em;margin:0 0 4px;color:var(--fg2)}
+h2{font-size:14px;font-weight:600;margin:26px 0 8px;color:var(--fg2)}
+.sub{color:var(--mute);margin:0 0 18px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;padding:14px 0 16px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-bottom:18px}
+.stat b{display:block;font-size:20px;font-weight:600;color:var(--fg2)}
+.stat span{color:var(--mute);font-size:12px}
+form.bar{margin:0 0 14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input,select,textarea{background:var(--bg2);border:1px solid var(--line2);color:var(--fg);padding:6px 9px;border-radius:4px;font:inherit}
+textarea{width:100%;min-height:90px}
+input[type=checkbox]{width:auto}
+button,.btn{background:var(--line);border:1px solid var(--line2);color:var(--fg);padding:6px 14px;border-radius:4px;font:inherit;cursor:pointer}
+button:hover,.btn:hover{background:var(--line2)}
+button.link{background:none;border:none;color:var(--link);padding:0;cursor:pointer;font:inherit}
+button.danger{color:var(--bad)}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;color:var(--mute);font-weight:500;padding:6px 10px;border-bottom:1px solid var(--line2);white-space:nowrap}
+td{padding:6px 10px;border-bottom:1px solid #1b1f24;white-space:nowrap;vertical-align:top}
+tr:hover td{background:var(--panel)}
+td.num,th.num{text-align:right}
+td.wrap{white-space:normal}
+.gpu{color:var(--ok)}.split{color:var(--warn)}.cpu{color:var(--bad)}.none,.unknown{color:var(--mute)}
+.slow{color:var(--bad)}.err{color:var(--bad)}.ok{color:var(--ok)}.mute{color:var(--mute)}
+pre{background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:14px;white-space:pre-wrap;word-break:break-word;overflow-x:auto;color:var(--fg)}
+code{background:var(--bg2);border:1px solid var(--line);border-radius:3px;padding:1px 5px}
+.kv{display:grid;grid-template-columns:190px 1fr;gap:4px 16px;margin-bottom:24px}
+.kv div:nth-child(odd){color:var(--mute)}
+.nav{margin-top:18px;display:flex;gap:14px}
+.flash{padding:10px 14px;border-radius:6px;margin:0 0 16px;border:1px solid var(--line2);background:var(--panel)}
+.flash.bad{border-color:var(--bad);color:var(--bad)}
+.flash.good{border-color:var(--ok)}
+.banner{padding:10px 14px;border-radius:6px;margin:0 0 16px;border:1px solid var(--warn);color:var(--warn);background:#1e1a10}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:22px}
+.panel{border:1px solid var(--line);border-radius:6px;padding:16px 18px;background:var(--panel)}
+.field{margin:0 0 12px}.field label{display:block;color:var(--mute);font-size:12px;margin-bottom:3px}
+.field input[type=text],.field input[type=password],.field input[type=number],.field select{width:100%}
+.help{color:var(--mute);font-size:12px;margin-top:3px}
+.keybox{font-size:16px;padding:12px;background:var(--bg2);border:1px solid var(--ok);border-radius:6px;word-break:break-all;color:var(--fg2);user-select:all}
+.tblwrap{overflow-x:auto}
+@media (max-width:700px){.kv{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+{% if user %}
+<header class="top">
+  <a class="brand" href="/ui">Ollama proxy</a>
+  <nav>
+    <a href="/ui" class="{{ 'active' if path in ('/ui', '/ui/') or path.startswith('/ui/r/') else '' }}">Log</a>
+    <a href="/ui/providers" class="{{ 'active' if path.startswith('/ui/providers') else '' }}">Poskytovatelé</a>
+    <a href="/ui/keys" class="{{ 'active' if path.startswith('/ui/keys') else '' }}">API klíče</a>
+    <a href="/ui/settings" class="{{ 'active' if path.startswith('/ui/settings') else '' }}">Nastavení</a>
+    <a href="/mgmt/docs" target="_blank">API docs</a>
+  </nav>
+  <span class="who">{{ user.username }} ·
+    <form method="post" action="/ui/logout" style="display:inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">odhlásit</button></form>
+  </span>
+</header>
+{% endif %}
+<main>
+{% if warn_default_pw %}<div class="banner">Přihlášen jsi výchozím heslem. <a href="/ui/settings">Změň ho v nastavení</a>, proxy je dostupná v síti.</div>{% endif %}
+{% if err %}<div class="flash bad">{{ err }}</div>{% endif %}
+{% if msg %}<div class="flash good">{{ msg }}</div>{% endif %}
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>
