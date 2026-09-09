@@ -9,6 +9,8 @@ from fastapi import FastAPI
 from . import config, mgmt, proxy, ui
 from .auth import hash_password
 from .db import db
+from .scheduler import sched
+from .telemetry import ps_models
 
 
 def ensure_admin():
@@ -46,6 +48,8 @@ async def lifespan(app: FastAPI):
     db.init(config.DB_PATH)
     ensure_admin()
     app.state.client = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0))
+    sched.refresh(db)
+    sched.loaded_probe = lambda: ps_models(app.state.client, config.UPSTREAM)
     task = asyncio.create_task(retention_loop())
     print("proxy " + config.VERSION + " ready, upstream = " + config.UPSTREAM
           + (", commit " + config.GIT_COMMIT if config.GIT_COMMIT else ""), flush=True)

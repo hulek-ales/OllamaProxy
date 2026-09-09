@@ -21,6 +21,7 @@
   <div>eval trvání ms</div><div>{{ row.eval_duration_ms | fmt(0) }}</div>
   <div>celkové trvání ms</div><div>{{ row.total_duration_ms | fmt(0) }}</div>
   <div>wall time ms</div><div>{{ row.wall_time_ms | fmt(0) }}</div>
+  {% if row.queue_ms %}<div>čekání ve frontě ms</div><div>{{ row.queue_ms | fmt(0) }} <span class="mute">(plánovač modelů, započteno ve wall time)</span></div>{% endif %}
   {% if row.cost_usd is not none %}<div>cena</div><div>{{ row.cost_usd | money }}</div>{% endif %}
   {% if row.provider == 'ollama' %}
   <div>umístění modelu</div><div class="{{ row.placement or 'unknown' }}">{{ row.placement or '—' }}</div>

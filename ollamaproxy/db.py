@@ -87,19 +87,28 @@ EXTRA_COLUMNS = [
     ("cost_usd", "REAL"),
     ("error", "TEXT"),
     ("client_user", "TEXT"),   # uživatel z hlavičky X-OpenWebUI-User-Name (Open WebUI)
+    ("queue_ms", "REAL"),      # kolik dotaz čekal v plánovači na uvolnění GPU
+]
+
+# sloupce tabulky api_keys přidané později
+EXTRA_KEY_COLUMNS = [
+    ("allowed_models", "TEXT DEFAULT ''"),   # glob vzory povolených modelů, oddělené čárkou
 ]
 
 LIGHT_COLS = (
     "id, ts, endpoint, model, status, prompt_tokens, completion_tokens, "
     "total_duration_ms, eval_duration_ms, tokens_per_sec, wall_time_ms, "
     "placement, vram_pct, loaded_model, load1, load5, mem_avail_pct, concurrent, "
-    "provider, key_name, client_ip, cost_usd, error, client_user"
+    "provider, key_name, client_ip, cost_usd, error, client_user, queue_ms"
 )
 
 SETTING_DEFAULTS = {
     "retention_days": "0",          # 0 = nemazat
     "log_bodies": config.LOG_BODIES_DEFAULT,
     "ollama_require_key": "0",      # 1 = i holé Ollama API chce proxy klíč
+    "sched_enabled": "1",           # plánovač modelů pro lokální Ollamu (viz scheduler.py)
+    "sched_hold_s": "10",           # po posledním dotazu drží GPU model ještě tolik sekund
+    "sched_max_wait_s": "90",       # déle nikdo nečeká: nové dotazy na aktuální model jdou do fronty
 }
 
 PROVIDER_KINDS = ("openai", "anthropic", "google", "ollama")
@@ -166,11 +175,12 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.conn.execute("PRAGMA journal_mode=WAL")
-        for col, typ in EXTRA_COLUMNS:
-            try:
-                self.conn.execute("ALTER TABLE requests ADD COLUMN " + col + " " + typ)
-            except sqlite3.OperationalError:
-                pass  # sloupec už existuje
+        for table, columns in (("requests", EXTRA_COLUMNS), ("api_keys", EXTRA_KEY_COLUMNS)):
+            for col, typ in columns:
+                try:
+                    self.conn.execute("ALTER TABLE " + table + " ADD COLUMN " + col + " " + typ)
+                except sqlite3.OperationalError:
+                    pass  # sloupec už existuje
         self.conn.commit()
         self.migrate_legacy()
         self._settings = {r["key"]: r["value"] for r in self.conn.execute("SELECT key, value FROM settings")}
@@ -278,20 +288,29 @@ class Database:
 
     # ---------------------------------------------------------------- API klíče
 
-    def create_key(self, name, key_hash, prefix, role="client", allowed_providers=()) -> int:
+    def create_key(self, name, key_hash, prefix, role="client", allowed_providers=(),
+                   allowed_models=()) -> int:
         with self.lock:
             cur = self.conn.execute(
-                "INSERT INTO api_keys (name, key_hash, prefix, role, allowed_providers, created_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, key_hash, prefix, role, ",".join(allowed_providers), now_iso()))
+                "INSERT INTO api_keys (name, key_hash, prefix, role, allowed_providers,"
+                " allowed_models, created_at) VALUES (?,?,?,?,?,?,?)",
+                (name, key_hash, prefix, role, ",".join(allowed_providers),
+                 ",".join(allowed_models), now_iso()))
             self.conn.commit()
             return cur.lastrowid
 
     def list_keys(self) -> list:
         with self.lock:
             return _rows(self.conn.execute(
-                "SELECT id, name, prefix, role, allowed_providers, created_at, last_used_at, disabled"
-                " FROM api_keys ORDER BY id"))
+                "SELECT id, name, prefix, role, allowed_providers, allowed_models, created_at,"
+                " last_used_at, disabled FROM api_keys ORDER BY id"))
+
+    def update_key_models(self, key_id: int, allowed_models) -> bool:
+        with self.lock:
+            cur = self.conn.execute("UPDATE api_keys SET allowed_models = ? WHERE id = ?",
+                                    (",".join(allowed_models), key_id))
+            self.conn.commit()
+            return cur.rowcount > 0
 
     def get_key_by_hash(self, key_hash: str):
         with self.lock:

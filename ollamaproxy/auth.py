@@ -2,9 +2,11 @@
 
 import hashlib
 import hmac
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 
 PBKDF2_ITER = 200_000
 SESSION_TTL = 30 * 24 * 3600
@@ -73,12 +75,42 @@ def hash_key(plain: str) -> str:
     return hashlib.sha256(plain.encode()).hexdigest()
 
 
+def model_allowed(patterns, model: str) -> bool:
+    """Glob vzory (`gemma4:*`, `*-mini`, `gemma4`). Prázdný seznam = všechno.
+    Vzor bez dvojtečky pokrývá i všechny tagy modelu (`gemma4` → `gemma4:12b`)."""
+    if not patterns:
+        return True
+    if not model:
+        return False
+    base = model.split(":", 1)[0]
+    for pat in patterns:
+        if fnmatchcase(model, pat):
+            return True
+        if ":" not in pat and fnmatchcase(base, pat):
+            return True
+    return False
+
+
+def parse_model_patterns(raw) -> list:
+    """Z textu (čárky / mezery / řádky) nebo seznamu udělá čistý seznam vzorů."""
+    if not raw:
+        return []
+    items = raw if isinstance(raw, (list, tuple)) else re.split(r"[,\s]+", str(raw))
+    out = []
+    for it in items:
+        it = str(it).strip()
+        if it and it not in out:
+            out.append(it)
+    return out
+
+
 @dataclass
 class Principal:
     kind: str                      # "session" | "key"
     name: str
     role: str                      # "admin" | "client"
-    allowed: list = field(default_factory=list)
+    allowed: list = field(default_factory=list)    # poskytovatelé (slugy); prázdné = všichni
+    models: list = field(default_factory=list)     # glob vzory modelů; prázdné = všechny
     key_id: int = None
     user_id: int = None
 
@@ -88,6 +120,10 @@ class Principal:
 
     def may_use(self, provider_slug: str) -> bool:
         return self.is_admin or not self.allowed or provider_slug in self.allowed
+
+    def may_model(self, model: str) -> bool:
+        """Seznam modelů platí pro každý klíč bez ohledu na roli (session z GUI omezená není)."""
+        return model_allowed(self.models, model)
 
 
 def _bearer_candidates(request) -> list:
@@ -112,7 +148,8 @@ def principal_from_request(request, db):
         if row and not row["disabled"]:
             db.touch_key(row["id"])
             allowed = [s for s in (row["allowed_providers"] or "").split(",") if s]
-            return Principal("key", row["name"], row["role"], allowed, key_id=row["id"])
+            models = parse_model_patterns(row.get("allowed_models") or "")
+            return Principal("key", row["name"], row["role"], allowed, models, key_id=row["id"])
         return None  # klíč vypadá jako náš, ale neplatí → nepouštět dál
     uid = parse_session(db.secret, request.cookies.get(SESSION_COOKIE))
     if uid is not None:

@@ -11,10 +11,11 @@ from fastapi.templating import Jinja2Templates
 
 from . import config
 from .auth import (SESSION_COOKIE, csrf_token, hash_password, make_session, new_api_key,
-                   parse_session, verify_password)
+                   parse_model_patterns, parse_session, verify_password)
 from .db import PROVIDER_KINDS, db
 from .providers import (DEFAULT_BASE_URL, KIND_LABELS, client_base_url, fetch_models,
                         mask_key, parse_pricing)
+from .scheduler import sched
 
 router = APIRouter(prefix="/ui", tags=["ui"], include_in_schema=False)
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
@@ -313,11 +314,26 @@ async def keys_create(request: Request):
     if role not in ("admin", "client"):
         role = "client"
     allowed = [s for s in form.getlist("allowed") if s]
+    models = parse_model_patterns(form.get("allowed_models") or "")
     plain, h, prefix = new_api_key()
-    db.create_key(name, h, prefix, role, allowed)
+    db.create_key(name, h, prefix, role, allowed, models)
     return render(request, "keys.html", user, rows=db.list_keys(),
                   providers=[p["slug"] for p in db.list_providers()], root=proxy_root(request),
                   new_key=plain, new_key_name=name)
+
+
+@router.post("/keys/{kid}/models")
+async def keys_models(kid: int, request: Request):
+    user = current_user(request)
+    if not user:
+        return login_redirect(request)
+    form = await form_with_csrf(request)
+    if form is None:
+        return back("/ui/keys", err="Formulář vypršel, zkus to znovu.")
+    models = parse_model_patterns(form.get("allowed_models") or "")
+    if not db.update_key_models(kid, models):
+        return back("/ui/keys", err="Klíč neexistuje.")
+    return back("/ui/keys", msg="Povolené modely uloženy: " + (", ".join(models) or "všechny") + ".")
 
 
 @router.post("/keys/{kid}/delete")
@@ -338,8 +354,13 @@ async def settings_page(request: Request):
     user = current_user(request)
     if not user:
         return login_redirect(request)
+    status = sched.snapshot()
+    try:
+        status["loaded"] = sorted(await sched.loaded(force=True))
+    except Exception:
+        status["loaded"] = []
     return render(request, "settings.html", user, settings=db.public_settings(),
-                  db_mb=round(db.size_bytes() / 1048576, 1), root=proxy_root(request))
+                  db_mb=round(db.size_bytes() / 1048576, 1), root=proxy_root(request), sched=status)
 
 
 @router.post("/settings")
@@ -357,6 +378,13 @@ async def settings_save(request: Request):
     db.set_setting("retention_days", days)
     db.set_setting("log_bodies", "1" if form.get("log_bodies") else "0")
     db.set_setting("ollama_require_key", "1" if form.get("ollama_require_key") else "0")
+    db.set_setting("sched_enabled", "1" if form.get("sched_enabled") else "0")
+    for key, default in (("sched_hold_s", 10), ("sched_max_wait_s", 90)):
+        try:
+            db.set_setting(key, max(0.0, float(form.get(key) or default)))
+        except ValueError:
+            db.set_setting(key, default)
+    sched.refresh(db)
     return back("/ui/settings", msg="Nastavení uloženo.")
 
 

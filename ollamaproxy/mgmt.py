@@ -5,15 +5,18 @@ Autentizace: `Authorization: Bearer opx_…` (klíč z GUI) nebo přihlášená 
 nastavení jen klíč s rolí admin (nebo session).
 """
 
+import asyncio
+import time
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from . import config
-from .auth import hash_key, new_api_key, principal_from_request
+from .auth import hash_key, new_api_key, parse_model_patterns, principal_from_request
 from .db import PROVIDER_KINDS, SETTING_DEFAULTS, db
 from .providers import client_base_url, fetch_models, mask_key, parse_pricing
+from .scheduler import sched
 from .telemetry import active, gpu_snapshot, host_snapshot
 
 router = APIRouter(prefix="/mgmt/v1", tags=["mgmt"])
@@ -63,6 +66,7 @@ async def health(request: Request):
     snap["version"] = config.VERSION
     snap["commit"] = config.GIT_COMMIT
     snap["db_bytes"] = db.size_bytes()
+    snap["scheduler"] = sched.snapshot()
     return snap
 
 
@@ -111,7 +115,8 @@ async def models(request: Request):
     out = {}
     try:
         out["ollama"] = {"ok": True, "base_url": proxy_root(request),
-                         "models": await fetch_models(client, "ollama", config.UPSTREAM, "")}
+                         "models": [m for m in await fetch_models(client, "ollama", config.UPSTREAM, "")
+                                    if p.may_model(m)]}
     except Exception as exc:
         out["ollama"] = {"ok": False, "error": str(exc), "models": []}
     for prov in db.list_providers():
@@ -120,12 +125,101 @@ async def models(request: Request):
         entry = {"kind": prov["kind"],
                  "base_url": client_base_url(proxy_root(request), prov["slug"], prov["kind"])}
         try:
-            entry["models"] = await fetch_models(client, prov["kind"], prov["base_url"], prov["api_key"])
+            entry["models"] = [m for m in await fetch_models(client, prov["kind"], prov["base_url"], prov["api_key"])
+                               if p.may_model(m)]
             entry["ok"] = True
         except Exception as exc:
             entry.update({"ok": False, "error": str(exc), "models": []})
         out[prov["slug"]] = entry
     return out
+
+
+# ------------------------------------------------- plánovač lokální Ollamy
+
+class LoadIn(BaseModel):
+    model: str = Field(min_length=1)
+    wait_s: float = Field(default=0, ge=0, le=300)   # jak dlouho smí volání blokovat
+    keep_alive: Optional[str] = None                 # předá se Ollamě (např. "30m", "-1")
+
+
+_loading = {}      # model → task, který ho v Ollamě nahrává (drží místo v plánovači)
+_interest = {}     # model → (first_ts, last_poll_ts): pořadí ve frontě přes opakované dotazy
+
+
+async def _load_in_ollama(client, model: str, keep_alive):
+    """Prázdný /api/generate = Ollama model jen nahraje. Místo v plánovači se vrátí po doběhnutí."""
+    try:
+        body = {"model": model, "prompt": "", "stream": False}
+        if keep_alive is not None:
+            body["keep_alive"] = keep_alive
+        r = await client.post(config.UPSTREAM + "/api/generate", json=body, timeout=600.0)
+        r.raise_for_status()
+        return None
+    except Exception as exc:
+        return str(exc)
+    finally:
+        sched.release(model)
+        _loading.pop(model, None)
+
+
+def _load_view(model: str, loaded: bool, status: str, error=None) -> dict:
+    snap = sched.snapshot()
+    return {"model": model, "loaded": loaded, "status": status, "error": error,
+            "admitted": snap["admitted"], "in_flight": snap["in_flight"], "waiting": snap["waiting"],
+            "hold_s": snap["hold_s"], "scheduler_enabled": snap["enabled"]}
+
+
+@router.get("/models/status")
+async def models_status(request: Request):
+    """Co Ollama drží v paměti a co dělá plánovač (fronta po modelech, kdo má GPU)."""
+    require(request)
+    snap = sched.snapshot()
+    snap["loaded"] = sorted(await sched.loaded(force=True))
+    return snap
+
+
+@router.post("/models/load")
+async def models_load(body: LoadIn, request: Request):
+    """Požádá o načtení modelu do Ollamy. Vrátí `loaded: true`, když je model na GPU a
+    dotazy na něj jdou hned; `false` se `status` `queued` (GPU drží jiný model, jsme ve frontě)
+    nebo `loading` (Ollama ho zrovna nahrává). `wait_s` = kolik sekund smí volání blokovat;
+    opakuj dotaz, dokud není `loaded: true`, a pak pošli inference do `hold_s` sekund."""
+    p = require(request)
+    model = body.model.strip()
+    if not p.may_model(model):
+        raise HTTPException(403, "model '" + model + "' is not allowed for this key")
+    deadline = time.monotonic() + body.wait_s
+
+    task = _loading.get(model)
+    if task is None:
+        now = time.monotonic()
+        first, last = _interest.get(model, (now, now))
+        since = first if now - last < 60 else now
+        _interest[model] = (since, now)
+        try:
+            await sched.acquire(model, timeout=body.wait_s, since=since)
+        except TimeoutError:
+            return _load_view(model, False, "queued")
+        _interest.pop(model, None)
+        task = _loading.get(model)
+        if task is not None:                      # mezitím ho začal nahrávat souběžný dotaz
+            sched.release(model)
+        elif model in await sched.loaded(force=True):
+            sched.release(model)
+            return _load_view(model, True, "ready")
+        else:
+            task = asyncio.get_running_loop().create_task(
+                _load_in_ollama(request.app.state.client, model, body.keep_alive))
+            _loading[model] = task
+
+    remaining = max(0.0, deadline - time.monotonic())
+    try:
+        error = await asyncio.wait_for(asyncio.shield(task), remaining)
+    except asyncio.TimeoutError:
+        return _load_view(model, False, "loading")
+    if error:
+        return _load_view(model, False, "error", error)
+    return _load_view(model, True, "ready")
 
 
 # ---------------------------------------------------------- poskytovatelé
@@ -217,6 +311,11 @@ class KeyIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     role: str = "client"
     allowed_providers: list = Field(default_factory=list)
+    allowed_models: list = Field(default_factory=list)   # glob vzory, prázdné = všechny
+
+
+class KeyModelsIn(BaseModel):
+    allowed_models: list = Field(default_factory=list)
 
 
 @router.get("/keys")
@@ -232,8 +331,19 @@ async def create_key(body: KeyIn, request: Request):
     if body.role not in ("admin", "client"):
         raise HTTPException(422, "role must be admin or client")
     plain, h, prefix = new_api_key()
-    kid = db.create_key(body.name, h, prefix, body.role, [str(s) for s in body.allowed_providers])
-    return {"id": kid, "name": body.name, "role": body.role, "key": plain}
+    models_ = parse_model_patterns(body.allowed_models)
+    kid = db.create_key(body.name, h, prefix, body.role, [str(s) for s in body.allowed_providers], models_)
+    return {"id": kid, "name": body.name, "role": body.role, "allowed_models": models_, "key": plain}
+
+
+@router.put("/keys/{kid}/models")
+async def update_key_models(kid: int, body: KeyModelsIn, request: Request):
+    """Změní seznam povolených modelů existujícího klíče (prázdný = všechny)."""
+    require(request, admin=True)
+    models_ = parse_model_patterns(body.allowed_models)
+    if not db.update_key_models(kid, models_):
+        raise HTTPException(404, "no such key")
+    return {"id": kid, "allowed_models": models_}
 
 
 @router.delete("/keys/{kid}", status_code=204)
@@ -251,6 +361,9 @@ class SettingsIn(BaseModel):
     retention_days: Optional[int] = None
     log_bodies: Optional[bool] = None
     ollama_require_key: Optional[bool] = None
+    sched_enabled: Optional[bool] = None
+    sched_hold_s: Optional[float] = Field(default=None, ge=0, le=3600)
+    sched_max_wait_s: Optional[float] = Field(default=None, ge=0, le=3600)
 
 
 @router.get("/settings")
@@ -268,6 +381,13 @@ async def put_settings(body: SettingsIn, request: Request):
         db.set_setting("log_bodies", "1" if body.log_bodies else "0")
     if body.ollama_require_key is not None:
         db.set_setting("ollama_require_key", "1" if body.ollama_require_key else "0")
+    if body.sched_enabled is not None:
+        db.set_setting("sched_enabled", "1" if body.sched_enabled else "0")
+    if body.sched_hold_s is not None:
+        db.set_setting("sched_hold_s", body.sched_hold_s)
+    if body.sched_max_wait_s is not None:
+        db.set_setting("sched_max_wait_s", body.sched_max_wait_s)
+    sched.refresh(db)
     return db.public_settings()
 
 

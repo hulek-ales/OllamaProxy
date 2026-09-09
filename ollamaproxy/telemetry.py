@@ -81,3 +81,11 @@ async def gpu_snapshot(client: httpx.AsyncClient, upstream: str, want_model: str
         "vram_pct": pct,
         "loaded_model": entry.get("name") or entry.get("model"),
     }
+
+
+async def ps_models(client: httpx.AsyncClient, upstream: str) -> list:
+    """Názvy modelů, které Ollama právě drží v paměti (/api/ps). Výjimka = Ollama neodpovídá."""
+    resp = await client.get(upstream + "/api/ps", timeout=2.0)
+    resp.raise_for_status()
+    return [m.get("name") or m.get("model") for m in resp.json().get("models") or []
+            if m.get("name") or m.get("model")]

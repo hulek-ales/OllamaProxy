@@ -38,7 +38,14 @@ class Upstream:
                 return httpx.Response(200, json={"models": [
                     {"name": "gemma4:12b", "size": 1000, "size_vram": 1000}]})
             if path == "/api/tags":
-                return httpx.Response(200, json={"models": [{"name": "gemma4:12b"}]})
+                return httpx.Response(200, json={"models": [{"name": "gemma4:12b"}, {"name": "llama3:8b"},
+                                                            {"name": "nomic-embed-text:latest"}]})
+            if path == "/v1/models":
+                return httpx.Response(200, json={"object": "list", "data": [
+                    {"id": "gemma4:12b"}, {"id": "llama3:8b"}]})
+            if path == "/api/generate":
+                body = json.loads(request.content)
+                return httpx.Response(200, json={"model": body.get("model"), "response": "", "done": True})
             if path == "/api/chat":
                 return httpx.Response(200, content=ndjson(
                     {"model": "gemma4:12b", "message": {"role": "assistant", "content": "Ahoj"}, "done": False},

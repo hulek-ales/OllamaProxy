@@ -25,7 +25,12 @@ Open WebUI / aplikace ──► ollama-proxy :11435 ──► open-webui:11434 (
   OpenRouter, Groq, …) leží jen v proxy; aplikace dostanou proxy klíč `opx_…`.
   Tokeny se čtou z OpenAI, Anthropic i Gemini formátů, volitelně se počítá cena.
 - **API klíče** s rolí `client` (jen dotazy) nebo `admin` (i log a správa),
-  případně omezené na konkrétní poskytovatele.
+  případně omezené na konkrétní poskytovatele a **seznam povolených modelů**
+  (projekt pak nevidí a nesmí použít nic jiného, třeba komerční API).
+- **Plánovač modelů** pro jednu GPU: dotazy na model, který není ve VRAM,
+  počkají, až doběhne model, který ji drží, a pustí se najednou. Projekt, který
+  čekat nechce, pošle `X-Opx-Wait: 0` (dostane 503) nebo se předem zeptá
+  `POST /mgmt/v1/models/load` a dostane `loaded: true/false`.
 - **Self-update z Gitu**: restart kontejneru = `git pull` (viz DEPLOY-TRUENAS.md).
 - Retence logu, změna hesla, vše v GUI nebo přes API.
 
@@ -71,6 +76,74 @@ do Ollamy ho nepřeposílá. Stránka **Spotřeba** (`/ui/usage`, API
 - **Vynucení klíče** pro holé Ollama API zapni v Nastavení až po ověření, že
   Open WebUI s vyplněným klíčem načte modely. Jinak by přestal fungovat.
 
+### Povolené modely u klíče
+
+Každý klíč může mít seznam vzorů modelů (GUI → API klíče, nebo
+`POST /mgmt/v1/keys` s `allowed_models`). Prázdný seznam = všechno.
+
+- `gemma4:12b` přesně; `gemma4` = všechny tagy (`gemma4:12b`, `gemma4:latest`);
+  `qwen3*`, `*-mini` = glob.
+- Dotaz na jiný model (Ollama i poskytovatelé, u Gemini z cesty) dostane
+  `403 {"error": "model 'x' is not allowed for key 'y'"}` a zapíše se do logu
+  se stavem 403, takže je vidět, kdo co zkoušel.
+- Seznamy modelů (`/api/tags`, `/v1/models`, `/mgmt/v1/models`) se klíči ořežou,
+  Open WebUI s takovým klíčem nabídne jen povolené modely.
+- Seznam se dá změnit i u existujícího klíče (GUI v tabulce, nebo
+  `PUT /mgmt/v1/keys/{id}/models`). Klíč omezený na lokální modely se ke
+  komerčním API nedostane, i kdyby měl poskytovatele povolené.
+
+### Plánovač modelů (jedna GPU, víc projektů)
+
+Na 12 GB VRAM se vejde jeden velký model. Když projekty střídají modely, Ollama
+by je přehazovala při každém dotazu (reload 30–90 s). Proxy proto dotazy na
+lokální Ollamu (`/api/chat`, `/api/generate`, `/api/embed*`, `/v1/chat/completions`,
+`/v1/completions`, `/v1/embeddings`) řadí:
+
+1. Dotaz na model, který **GPU drží** (nebo je podle `/api/ps` načtený vedle
+   něj, protože se vejde), jde rovnou.
+2. Dotaz na jiný model **čeká**, dokud neběží nic a neuplyne `sched_hold_s`
+   (výchozí 10 s) od posledního dokončení — navazující tah v konverzaci tak
+   nečeká na reload.
+3. Pak se přepne na model, na který se čeká **nejdéle**, a pustí se všechny
+   jeho čekající dotazy najednou.
+4. Čeká-li někdo déle než `sched_max_wait_s` (výchozí 90 s), nové dotazy na
+   aktuální model se zařadí do fronty, aby GPU uvolnily (ochrana před vyhladověním).
+
+Čekání se zapisuje do logu (`queue_ms`, v detailu záznamu). Nastavení a živý stav
+jsou v GUI → Nastavení, nebo `GET /mgmt/v1/models/status`. Vypnout jde
+`sched_enabled=0`. Komerční poskytovatelé a další Ollama servery přes
+`/providers/` plánovačem neprocházejí.
+
+Projekt, který nechce viset na čekání, má dvě možnosti:
+
+```bash
+# a) nečekat: hlavička X-Opx-Wait (sekundy, 0 = vůbec) → 503 + Retry-After, dotaz se zaloguje se stavem 503
+curl -H "Authorization: Bearer opx_…" -H "X-Opx-Wait: 0" http://server:11435/api/chat -d '{…}'
+
+# b) zeptat se předem: požadavek na načtení modelu
+curl -H "Authorization: Bearer opx_…" -H 'content-type: application/json' \
+  http://server:11435/mgmt/v1/models/load -d '{"model":"gemma4:12b","wait_s":30,"keep_alive":"30m"}'
+# → {"model":"gemma4:12b","loaded":true,"status":"ready","admitted":"gemma4:12b","hold_s":10,…}
+#   loaded=false, status=queued   GPU drží jiný model, který zrovna odpovídá; volej znovu
+#   loaded=false, status=loading  Ollama model nahrává (nikdo ho nepředběhne); volej znovu
+#   loaded=true,  status=ready    pošli dotazy do hold_s sekund, GPU je tvoje
+```
+
+`wait_s` (0–300) říká, jak dlouho smí volání blokovat; s `wait_s` > 0 si projekt
+drží pořadí ve frontě. V Pythonu:
+
+```python
+import time, requests
+H = {"Authorization": "Bearer opx_…"}
+while True:
+    r = requests.post("http://server:11435/mgmt/v1/models/load", headers=H,
+                      json={"model": "gemma4:12b", "wait_s": 30}).json()
+    if r["loaded"]:
+        break
+    time.sleep(2)
+requests.post("http://server:11435/api/chat", headers=H, json={"model": "gemma4:12b", "messages": [...]})
+```
+
 ### Komerční API přes proxy
 
 1. GUI → Poskytovatelé → přidat (slug `openai`, typ OpenAI-kompatibilní,
@@ -115,7 +188,9 @@ curl -H "$H" 'http://server:11435/mgmt/v1/requests/123'                     # de
 curl -H "$H" 'http://server:11435/mgmt/v1/stats?since=7d'                   # součty po poskytovatelích, modelech, umístění, klíčích
 curl -H "$H" 'http://server:11435/mgmt/v1/models'                           # modely přes Ollamu i poskytovatele
 curl -H "$H" 'http://server:11435/mgmt/v1/health'                           # stav (placement, load, verze, commit)
-curl -H "$H" -X POST 'http://server:11435/mgmt/v1/keys' -d '{"name":"app","role":"client"}' -H 'content-type: application/json'
+curl -H "$H" -X POST 'http://server:11435/mgmt/v1/keys' -d '{"name":"app","role":"client","allowed_models":["gemma4","nomic-embed-text"]}' -H 'content-type: application/json'
+curl -H "$H" 'http://server:11435/mgmt/v1/models/status'                    # co je v paměti Ollamy, kdo drží GPU, fronta
+curl -H "$H" -X POST 'http://server:11435/mgmt/v1/models/load' -d '{"model":"gemma4:12b","wait_s":30}' -H 'content-type: application/json'
 curl -H "$H" -X PUT  'http://server:11435/mgmt/v1/settings' -d '{"retention_days":90}' -H 'content-type: application/json'
 ```
 
@@ -130,8 +205,8 @@ curl -H "$H" -X PUT  'http://server:11435/mgmt/v1/settings' -d '{"retention_days
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / *(prázdné = `admin123`)* | počáteční účet, jen do prázdné DB |
 | `UPDATE_ON_START` / `REPO_URL` / `REPO_BRANCH` | `true` / toto repo / `main` | self-update při startu |
 
-Vše ostatní (poskytovatelé, klíče, retence, vyžadování klíče pro Ollamu) je v DB
-a nastavuje se v GUI nebo přes `/mgmt/v1`.
+Vše ostatní (poskytovatelé, klíče, retence, vyžadování klíče pro Ollamu,
+plánovač modelů) je v DB a nastavuje se v GUI nebo přes `/mgmt/v1`.
 
 ## Databáze
 
@@ -145,7 +220,7 @@ id, ts, endpoint, model, status, prompt_tokens, completion_tokens,
 total_duration_ms, eval_duration_ms, tokens_per_sec, wall_time_ms,
 request_json, response_text,
 placement, vram_pct, loaded_model, load1, load5, mem_avail_pct, concurrent,
-provider, key_name, client_ip, cost_usd, error, client_user
+provider, key_name, client_ip, cost_usd, error, client_user, queue_ms
 ```
 
 Dále `users`, `api_keys` (jen hash klíče), `providers` (klíč poskytovatele
@@ -161,5 +236,6 @@ OLLAMA_UPSTREAM=http://localhost:11434 OLLAMA_LOG_DB=./dev.db ADMIN_PASSWORD=dev
 ```
 
 Struktura: `ollamaproxy/proxy.py` (přeposílání a log), `collector.py` (čtení
-tokenů ze streamů), `providers.py` (hlavičky, modely, ceník), `mgmt.py` (JSON
-API), `ui.py` + `templates/` (GUI), `db.py`, `auth.py`, `telemetry.py`.
+tokenů ze streamů), `providers.py` (hlavičky, modely, ceník), `scheduler.py`
+(plánovač modelů), `mgmt.py` (JSON API), `ui.py` + `templates/` (GUI), `db.py`,
+`auth.py` (klíče, vzory modelů), `telemetry.py`.

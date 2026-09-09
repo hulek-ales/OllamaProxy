@@ -15,8 +15,29 @@
     <div class="help">Bez toho se loguje jen model, tokeny a časy.</div></div>
   <div class="field"><label><input type="checkbox" name="ollama_require_key" value="1" {{ 'checked' if settings.ollama_require_key == '1' }}> vyžadovat proxy klíč i pro holé Ollama API</label>
     <div class="help">Pozor: pak musí klíč posílat i Open WebUI (Connections → Ollama API → klíč). Komerční poskytovatelé klíč vyžadují vždy.</div></div>
+  <h2>Plánovač modelů (lokální Ollama)</h2>
+  <div class="field"><label><input type="checkbox" name="sched_enabled" value="1" {{ 'checked' if settings.sched_enabled == '1' }}> řadit dotazy podle načteného modelu</label>
+    <div class="help">Dotaz na model, který není ve VRAM, počká, až doběhnou dotazy na model, který GPU drží. Pak se přepne na nejdéle čekající model a pustí všechny jeho dotazy najednou. Modely, které se vejdou vedle sebe, nečekají.</div></div>
+  <div class="field"><label for="sched_hold_s">Držet model po posledním dotazu (s)</label>
+    <input type="number" id="sched_hold_s" name="sched_hold_s" min="0" step="1" value="{{ settings.sched_hold_s }}">
+    <div class="help">Navazující tah konverzace nečeká na reload; jiný model dostane GPU až po této době klidu.</div></div>
+  <div class="field"><label for="sched_max_wait_s">Nejdelší čekání ve frontě (s)</label>
+    <input type="number" id="sched_max_wait_s" name="sched_max_wait_s" min="0" step="1" value="{{ settings.sched_max_wait_s }}">
+    <div class="help">Čeká-li někdo déle, nové dotazy na aktuální model se zařadí do fronty, aby GPU uvolnily.</div></div>
   <button>Uložit</button>
 </form>
+</div>
+
+<div class="panel">
+<h2 style="margin-top:0">Stav plánovače</h2>
+<div class="kv">
+  <div>v paměti Ollamy</div><div>{{ sched.loaded | join(', ') or '—' }}</div>
+  <div>GPU drží</div><div>{{ sched.admitted or '—' }}{% if sched.draining %} <span class="mute">(uvolňuje pro čekající)</span>{% endif %}</div>
+  <div>běží</div><div>{% for m, n in sched.in_flight.items() %}{{ m }} × {{ n }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</div>
+  <div>čeká</div><div>{% for m, n in sched.waiting.items() %}{{ m }} × {{ n }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}{% if sched.oldest_wait_s %} <span class="mute">(nejdéle {{ sched.oldest_wait_s }} s)</span>{% endif %}</div>
+  <div>přepnutí modelu</div><div>{{ sched.switches }}</div>
+</div>
+<p class="help">Totéž přes API: <code>GET /mgmt/v1/models/status</code>. Projekt, který nechce čekat, pošle <code>X-Opx-Wait: 0</code> (dostane 503) nebo se předem zeptá <code>POST /mgmt/v1/models/load</code>.</p>
 </div>
 
 <div class="panel">
