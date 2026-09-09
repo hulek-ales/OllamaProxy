@@ -9,6 +9,9 @@ from fastapi import FastAPI
 from . import config, mgmt, proxy, ui
 from .auth import hash_password
 from .db import db
+from .jobs import worker
+from .scheduler import sched
+from .telemetry import ps_models
 
 
 def ensure_admin():
@@ -38,6 +41,14 @@ async def retention_loop():
                           flush=True)
             except Exception as exc:
                 print("[retence] selhala:", exc, flush=True)
+        try:
+            jdays = int(float(db.setting("jobs_retention_days") or 0))
+            n = db.purge_jobs(jdays)
+            if n:
+                print("[retence] smazáno " + str(n) + " hotových úloh starších než " + str(jdays) + " dní",
+                      flush=True)
+        except Exception as exc:
+            print("[retence úloh] selhala:", exc, flush=True)
         await asyncio.sleep(6 * 3600)
 
 
@@ -46,6 +57,9 @@ async def lifespan(app: FastAPI):
     db.init(config.DB_PATH)
     ensure_admin()
     app.state.client = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0))
+    sched.refresh(db)
+    sched.loaded_probe = lambda: ps_models(app.state.client, config.UPSTREAM)
+    worker.start(lambda: app.state.client)
     task = asyncio.create_task(retention_loop())
     print("proxy " + config.VERSION + " ready, upstream = " + config.UPSTREAM
           + (", commit " + config.GIT_COMMIT if config.GIT_COMMIT else ""), flush=True)
@@ -53,6 +67,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         task.cancel()
+        await worker.stop()
         await app.state.client.aclose()
         db.close()
 

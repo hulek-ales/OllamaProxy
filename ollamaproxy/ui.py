@@ -11,10 +11,12 @@ from fastapi.templating import Jinja2Templates
 
 from . import config
 from .auth import (SESSION_COOKIE, csrf_token, hash_password, make_session, new_api_key,
-                   parse_session, verify_password)
+                   parse_model_patterns, parse_session, verify_password)
 from .db import PROVIDER_KINDS, db
+from .jobs import job_view, worker
 from .providers import (DEFAULT_BASE_URL, KIND_LABELS, client_base_url, fetch_models,
                         mask_key, parse_pricing)
+from .scheduler import sched
 
 router = APIRouter(prefix="/ui", tags=["ui"], include_in_schema=False)
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
@@ -207,6 +209,51 @@ async def ui_detail(rid: int, request: Request):
     return render(request, "detail.html", user, row=r, rid=rid, request_pretty=pretty)
 
 
+# ------------------------------------------------------------------ úlohy
+
+@router.get("/jobs", response_class=HTMLResponse)
+async def ui_jobs(request: Request):
+    user = current_user(request)
+    if not user:
+        return login_redirect(request)
+    status = request.query_params.get("status", "").strip()
+    batch = request.query_params.get("batch", "").strip()
+    rows, total = db.list_jobs(status=status or None, batch_id=batch or None, limit=200)
+    return render(request, "jobs.html", user, rows=rows, total=total, status=status, batch=batch,
+                  jobs=worker.snapshot(), sched=sched.snapshot())
+
+
+@router.get("/jobs/{jid}", response_class=HTMLResponse)
+async def ui_job_detail(jid: int, request: Request):
+    user = current_user(request)
+    if not user:
+        return login_redirect(request)
+    job = db.get_job(jid)
+    view = job_view(job, with_bodies=True) if job else None
+    pretty = {}
+    if view:
+        for k in ("request", "result"):
+            if view.get(k) is not None:
+                pretty[k] = json.dumps(view[k], indent=2, ensure_ascii=False)
+    return render(request, "job.html", user, job=view, jid=jid, pretty=pretty)
+
+
+@router.post("/jobs/{jid}/cancel")
+async def ui_job_cancel(jid: int, request: Request):
+    user = current_user(request)
+    if not user:
+        return login_redirect(request)
+    if await form_with_csrf(request) is None:
+        return back("/ui/jobs", err="Formulář vypršel, zkus to znovu.")
+    res = db.cancel_job(jid)
+    if res == "running" and worker.current and worker.current["id"] == jid and worker.current_task:
+        worker._preempting = True
+        worker.current_task.cancel()
+        db.finish_job(jid, "cancelled", error="cancelled in GUI")
+        res = "cancelled"
+    return back("/ui/jobs", msg="Úloha " + str(jid) + ": " + res + ".")
+
+
 # ----------------------------------------------------------- poskytovatelé
 
 @router.get("/providers", response_class=HTMLResponse)
@@ -313,11 +360,36 @@ async def keys_create(request: Request):
     if role not in ("admin", "client"):
         role = "client"
     allowed = [s for s in form.getlist("allowed") if s]
+    models = parse_model_patterns(form.get("allowed_models") or "")
     plain, h, prefix = new_api_key()
-    db.create_key(name, h, prefix, role, allowed)
+    kid = db.create_key(name, h, prefix, role, allowed, models)
+    db.update_key_limits(kid, _int(form.get("max_jobs")), _int(form.get("rate_per_min")))
     return render(request, "keys.html", user, rows=db.list_keys(),
                   providers=[p["slug"] for p in db.list_providers()], root=proxy_root(request),
                   new_key=plain, new_key_name=name)
+
+
+@router.post("/keys/{kid}/models")
+async def keys_models(kid: int, request: Request):
+    user = current_user(request)
+    if not user:
+        return login_redirect(request)
+    form = await form_with_csrf(request)
+    if form is None:
+        return back("/ui/keys", err="Formulář vypršel, zkus to znovu.")
+    models = parse_model_patterns(form.get("allowed_models") or "")
+    if not db.update_key_models(kid, models):
+        return back("/ui/keys", err="Klíč neexistuje.")
+    db.update_key_limits(kid, _int(form.get("max_jobs")), _int(form.get("rate_per_min")))
+    return back("/ui/keys", msg="Klíč " + str(kid) + " uložen: modely "
+                + (", ".join(models) or "všechny") + ".")
+
+
+def _int(value, default=0):
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 @router.post("/keys/{kid}/delete")
@@ -338,8 +410,14 @@ async def settings_page(request: Request):
     user = current_user(request)
     if not user:
         return login_redirect(request)
+    status = sched.snapshot()
+    try:
+        status["loaded"] = sorted(await sched.loaded(force=True))
+    except Exception:
+        status["loaded"] = []
     return render(request, "settings.html", user, settings=db.public_settings(),
-                  db_mb=round(db.size_bytes() / 1048576, 1), root=proxy_root(request))
+                  db_mb=round(db.size_bytes() / 1048576, 1), root=proxy_root(request), sched=status,
+                  jobs=worker.snapshot())
 
 
 @router.post("/settings")
@@ -357,6 +435,18 @@ async def settings_save(request: Request):
     db.set_setting("retention_days", days)
     db.set_setting("log_bodies", "1" if form.get("log_bodies") else "0")
     db.set_setting("ollama_require_key", "1" if form.get("ollama_require_key") else "0")
+    db.set_setting("sched_enabled", "1" if form.get("sched_enabled") else "0")
+    db.set_setting("jobs_enabled", "1" if form.get("jobs_enabled") else "0")
+    for key, default in (("sched_hold_s", 10), ("sched_max_wait_s", 90), ("jobs_max_wait_s", 900),
+                         ("jobs_idle_s", 60), ("jobs_preempt_s", 0)):
+        try:
+            db.set_setting(key, max(0.0, float(form.get(key) or default)))
+        except ValueError:
+            db.set_setting(key, default)
+    for key, default in (("jobs_max_queued", 200), ("jobs_retention_days", 7), ("rate_limit_per_min", 0)):
+        db.set_setting(key, _int(form.get(key), default))
+    sched.refresh(db)
+    worker.wake()
     return back("/ui/settings", msg="Nastavení uloženo.")
 
 

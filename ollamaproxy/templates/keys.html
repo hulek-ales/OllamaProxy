@@ -14,16 +14,17 @@ Open WebUI: Admin → Settings → Connections → Ollama API → u adresy proxy
 
 <div class="tblwrap">
 <table>
-<tr><th>id<th>název<th>prefix<th>role<th>povolení poskytovatelé<th>vytvořen<th>naposledy použit<th></tr>
+<tr><th>id<th>název<th>prefix<th>role<th>povolení poskytovatelé<th>povolené modely · max. úloh · dotazů/min<th>vytvořen<th>naposledy použit<th></tr>
 {% for k in rows %}
 <tr>
   <td>{{ k.id }}<td>{{ k.name }}<td>{{ k.prefix }}…<td>{{ k.role }}
   <td>{{ k.allowed_providers or 'všichni' }}
+  <td><form method="post" action="/ui/keys/{{ k.id }}/models" style="display:flex;gap:4px"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="text" name="allowed_models" value="{{ k.allowed_models or '' }}" placeholder="všechny" style="min-width:160px" title="povolené modely"><input type="number" name="max_jobs" value="{{ k.max_jobs or 0 }}" min="0" style="width:64px" title="max. čekajících úloh (0 = výchozí)"><input type="number" name="rate_per_min" value="{{ k.rate_per_min or 0 }}" min="0" style="width:64px" title="dotazů za minutu (0 = výchozí)"><button class="link">uložit</button></form>
   <td>{{ k.created_at | ts }}<td>{{ k.last_used_at | ts if k.last_used_at else '—' }}
   <td><form method="post" action="/ui/keys/{{ k.id }}/delete" onsubmit="return confirm('Smazat klíč {{ k.name }}?')"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link danger">smazat</button></form>
 </tr>
 {% else %}
-<tr><td colspan="8">Zatím žádný klíč.</td></tr>
+<tr><td colspan="9">Zatím žádný klíč.</td></tr>
 {% endfor %}
 </table>
 </div>
@@ -43,6 +44,15 @@ Open WebUI: Admin → Settings → Connections → Ollama API → u adresy proxy
     {% for p in providers %}<label style="display:inline-block;margin-right:14px"><input type="checkbox" name="allowed" value="{{ p }}"> {{ p }}</label>{% endfor %}
   </div>
   {% endif %}
+  <div class="field"><label for="allowed_models">Povolené modely (nic = všechny)</label>
+    <input type="text" id="allowed_models" name="allowed_models" placeholder="gemma4:12b, nomic-embed-text, qwen3*">
+    <div class="help">Vzory oddělené čárkou, <code>*</code> = cokoli. Vzor bez dvojtečky pokrývá všechny tagy (<code>gemma4</code> = <code>gemma4:12b</code> i <code>gemma4:latest</code>).
+    Dotaz na jiný model dostane 403 a v seznamu modelů (<code>/api/tags</code>, <code>/v1/models</code>) klíč vidí jen ty svoje — tím se projekt nedostane ani ke komerčním modelům.</div></div>
+  <div class="field" style="display:flex;gap:16px">
+    <label>Max. čekajících úloh <input type="number" name="max_jobs" value="0" min="0" style="width:80px"></label>
+    <label>Dotazů za minutu <input type="number" name="rate_per_min" value="0" min="0" style="width:80px"></label>
+  </div>
+  <div class="help">0 = výchozí hodnota z Nastavení. Přes limit dostane aplikace 429 s <code>Retry-After</code>; limit za minutu platí pro průchozí dotazy i zadávání úloh.</div>
   <button>Vytvořit</button>
 </form>
 </div>
@@ -55,6 +65,16 @@ curl -H "Authorization: Bearer opx_…" "{{ root }}/mgmt/v1/models"
 
 # dotaz na lokální Ollamu přes proxy
 curl -H "Authorization: Bearer opx_…" {{ root }}/api/chat -d '{"model":"gemma4:12b","messages":[{"role":"user","content":"ahoj"}],"stream":false}'
+
+# nečekat na uvolnění GPU (jiný model zrovna odpovídá) → 503 + Retry-After místo čekání
+curl -H "Authorization: Bearer opx_…" -H "X-Opx-Wait: 0" {{ root }}/api/chat -d '…'
+
+# požádat o načtení modelu; loaded:true = můžeš posílat, false = fronta/nahrává se (opakuj)
+curl -H "Authorization: Bearer opx_…" {{ root }}/mgmt/v1/models/load -H 'content-type: application/json' -d '{"model":"gemma4:12b","wait_s":30}'
+
+# odložená úloha pro agenta (odpověď klidně za 15 minut): id hned, výsledek přes GET /mgmt/v1/jobs/{id}
+curl -H "Authorization: Bearer opx_…" {{ root }}/mgmt/v1/jobs -H 'content-type: application/json' \
+  -d '{"path":"/api/chat","body":{"model":"gemma4:12b","messages":[{"role":"user","content":"ahoj"}]}}'
 
 # interaktivní dokumentace: {{ root }}/mgmt/docs</pre>
 {% endblock %}

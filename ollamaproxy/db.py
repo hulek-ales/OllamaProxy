@@ -58,6 +58,32 @@ CREATE TABLE IF NOT EXISTS api_keys (
     disabled          INTEGER DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS jobs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id     TEXT,
+    key_id       INTEGER,
+    key_name     TEXT,
+    status       TEXT DEFAULT 'queued',   -- queued | running | done | error | cancelled
+    priority     INTEGER DEFAULT 5,       -- 0 = nejvyšší, 9 = nejnižší
+    provider     TEXT DEFAULT 'ollama',
+    path         TEXT,
+    model        TEXT,
+    request_json TEXT,
+    callback_url TEXT,
+    not_before   TEXT,
+    created_at   TEXT,
+    started_at   TEXT,
+    finished_at  TEXT,
+    attempts     INTEGER DEFAULT 0,
+    status_code  INTEGER,
+    result_json  TEXT,
+    error        TEXT,
+    request_id   INTEGER,
+    callback_status TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, priority, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_batch ON jobs(batch_id);
+
 CREATE TABLE IF NOT EXISTS providers (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     slug         TEXT UNIQUE NOT NULL,
@@ -87,19 +113,44 @@ EXTRA_COLUMNS = [
     ("cost_usd", "REAL"),
     ("error", "TEXT"),
     ("client_user", "TEXT"),   # uživatel z hlavičky X-OpenWebUI-User-Name (Open WebUI)
+    ("queue_ms", "REAL"),      # kolik dotaz čekal v plánovači na uvolnění GPU
+    ("job_id", "INTEGER"),     # dotaz vznikl z úlohy ve frontě (tabulka jobs)
+]
+
+# sloupce tabulky api_keys přidané později
+EXTRA_KEY_COLUMNS = [
+    ("allowed_models", "TEXT DEFAULT ''"),   # glob vzory povolených modelů, oddělené čárkou
+    ("max_jobs", "INTEGER DEFAULT 0"),       # strop čekajících úloh klíče; 0 = výchozí z nastavení
+    ("rate_per_min", "INTEGER DEFAULT 0"),   # dotazů za minutu; 0 = výchozí z nastavení
 ]
 
 LIGHT_COLS = (
     "id, ts, endpoint, model, status, prompt_tokens, completion_tokens, "
     "total_duration_ms, eval_duration_ms, tokens_per_sec, wall_time_ms, "
     "placement, vram_pct, loaded_model, load1, load5, mem_avail_pct, concurrent, "
-    "provider, key_name, client_ip, cost_usd, error, client_user"
+    "provider, key_name, client_ip, cost_usd, error, client_user, queue_ms, job_id"
+)
+
+JOB_LIGHT_COLS = (
+    "id, batch_id, key_id, key_name, status, priority, provider, path, model, callback_url,"
+    " not_before, created_at, started_at, finished_at, attempts, status_code, error, request_id,"
+    " callback_status"
 )
 
 SETTING_DEFAULTS = {
     "retention_days": "0",          # 0 = nemazat
     "log_bodies": config.LOG_BODIES_DEFAULT,
     "ollama_require_key": "0",      # 1 = i holé Ollama API chce proxy klíč
+    "sched_enabled": "1",           # plánovač modelů pro lokální Ollamu (viz scheduler.py)
+    "sched_hold_s": "10",           # po posledním dotazu drží GPU model ještě tolik sekund
+    "sched_max_wait_s": "90",       # déle nikdo nečeká: nové dotazy na aktuální model jdou do fronty
+    "jobs_enabled": "1",            # pracovník fronty úloh (jobs.py)
+    "jobs_max_wait_s": "900",       # úloha jiného modelu čeká nejdéle tolik, pak se model přepne
+    "jobs_idle_s": "60",            # po interaktivním dotazu se model kvůli úloze nepřehazuje tolik sekund
+    "jobs_preempt_s": "0",          # >0: běžící úlohu jiného modelu zrušit, když interaktivní dotaz čeká déle
+    "jobs_max_queued": "200",       # výchozí strop čekajících úloh na klíč
+    "jobs_retention_days": "7",     # hotové úlohy mazat po tolika dnech (0 = nemazat)
+    "rate_limit_per_min": "0",      # výchozí limit dotazů za minutu na klíč (0 = bez limitu)
 }
 
 PROVIDER_KINDS = ("openai", "anthropic", "google", "ollama")
@@ -166,11 +217,12 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.conn.execute("PRAGMA journal_mode=WAL")
-        for col, typ in EXTRA_COLUMNS:
-            try:
-                self.conn.execute("ALTER TABLE requests ADD COLUMN " + col + " " + typ)
-            except sqlite3.OperationalError:
-                pass  # sloupec už existuje
+        for table, columns in (("requests", EXTRA_COLUMNS), ("api_keys", EXTRA_KEY_COLUMNS)):
+            for col, typ in columns:
+                try:
+                    self.conn.execute("ALTER TABLE " + table + " ADD COLUMN " + col + " " + typ)
+                except sqlite3.OperationalError:
+                    pass  # sloupec už existuje
         self.conn.commit()
         self.migrate_legacy()
         self._settings = {r["key"]: r["value"] for r in self.conn.execute("SELECT key, value FROM settings")}
@@ -278,20 +330,180 @@ class Database:
 
     # ---------------------------------------------------------------- API klíče
 
-    def create_key(self, name, key_hash, prefix, role="client", allowed_providers=()) -> int:
+    def create_key(self, name, key_hash, prefix, role="client", allowed_providers=(),
+                   allowed_models=()) -> int:
         with self.lock:
             cur = self.conn.execute(
-                "INSERT INTO api_keys (name, key_hash, prefix, role, allowed_providers, created_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, key_hash, prefix, role, ",".join(allowed_providers), now_iso()))
+                "INSERT INTO api_keys (name, key_hash, prefix, role, allowed_providers,"
+                " allowed_models, created_at) VALUES (?,?,?,?,?,?,?)",
+                (name, key_hash, prefix, role, ",".join(allowed_providers),
+                 ",".join(allowed_models), now_iso()))
             self.conn.commit()
             return cur.lastrowid
 
     def list_keys(self) -> list:
         with self.lock:
             return _rows(self.conn.execute(
-                "SELECT id, name, prefix, role, allowed_providers, created_at, last_used_at, disabled"
-                " FROM api_keys ORDER BY id"))
+                "SELECT id, name, prefix, role, allowed_providers, allowed_models, created_at,"
+                " last_used_at, disabled FROM api_keys ORDER BY id"))
+
+    def update_key_models(self, key_id: int, allowed_models) -> bool:
+        with self.lock:
+            cur = self.conn.execute("UPDATE api_keys SET allowed_models = ? WHERE id = ?",
+                                    (",".join(allowed_models), key_id))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def update_key_limits(self, key_id: int, max_jobs=None, rate_per_min=None) -> bool:
+        sets, args = [], []
+        if max_jobs is not None:
+            sets.append("max_jobs = ?")
+            args.append(max(0, int(max_jobs)))
+        if rate_per_min is not None:
+            sets.append("rate_per_min = ?")
+            args.append(max(0, int(rate_per_min)))
+        if not sets:
+            return self.get_key(key_id) is not None
+        with self.lock:
+            cur = self.conn.execute("UPDATE api_keys SET " + ", ".join(sets) + " WHERE id = ?",
+                                    args + [key_id])
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def get_key(self, key_id: int):
+        with self.lock:
+            r = self.conn.execute("SELECT * FROM api_keys WHERE id = ?", (key_id,)).fetchone()
+        return dict(r) if r else None
+
+    # -------------------------------------------------------------- úlohy
+
+    def create_jobs(self, jobs: list) -> list:
+        """jobs = [{batch_id, key_id, key_name, priority, provider, path, model, request_json,
+        callback_url, not_before}] → seznam id."""
+        ids = []
+        with self.lock:
+            for j in jobs:
+                cur = self.conn.execute(
+                    "INSERT INTO jobs (batch_id, key_id, key_name, status, priority, provider, path,"
+                    " model, request_json, callback_url, not_before, created_at)"
+                    " VALUES (?,?,?,'queued',?,?,?,?,?,?,?,?)",
+                    (j["batch_id"], j.get("key_id"), j.get("key_name"), j.get("priority", 5),
+                     j.get("provider", "ollama"), j["path"], j.get("model"), j["request_json"],
+                     j.get("callback_url"), j.get("not_before"), now_iso()))
+                ids.append(cur.lastrowid)
+            self.conn.commit()
+        return ids
+
+    def get_job(self, job_id: int):
+        with self.lock:
+            r = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return dict(r) if r else None
+
+    def list_jobs(self, status=None, batch_id=None, key_id=None, limit=100, offset=0,
+                  with_bodies=False):
+        where, args = [], []
+        if status:
+            where.append("status = ?")
+            args.append(status)
+        if batch_id:
+            where.append("batch_id = ?")
+            args.append(batch_id)
+        if key_id is not None:
+            where.append("key_id = ?")
+            args.append(key_id)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        cols = "*" if with_bodies else JOB_LIGHT_COLS
+        with self.lock:
+            rows = _rows(self.conn.execute(
+                "SELECT " + cols + " FROM jobs" + clause + " ORDER BY id DESC LIMIT ? OFFSET ?",
+                args + [limit, offset]))
+            total = self.conn.execute("SELECT COUNT(*) FROM jobs" + clause, args).fetchone()[0]
+        return rows, total
+
+    def count_active_jobs(self, key_id) -> int:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE key_id IS ? AND status IN ('queued','running')",
+                (key_id,)).fetchone()[0]
+
+    def queued_jobs(self) -> list:
+        """Úlohy připravené ke spuštění (bez těl), nejdřív podle priority, pak stáří."""
+        with self.lock:
+            return _rows(self.conn.execute(
+                "SELECT " + JOB_LIGHT_COLS + " FROM jobs WHERE status = 'queued'"
+                " AND (not_before IS NULL OR not_before <= ?) ORDER BY priority, id", (now_iso(),)))
+
+    def start_job(self, job_id: int) -> bool:
+        with self.lock:
+            cur = self.conn.execute(
+                "UPDATE jobs SET status = 'running', started_at = ?, attempts = attempts + 1"
+                " WHERE id = ? AND status = 'queued'", (now_iso(), job_id))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def finish_job(self, job_id: int, status: str, status_code=None, result_json=None, error=None,
+                   request_id=None):
+        with self.lock:
+            self.conn.execute(
+                "UPDATE jobs SET status = ?, finished_at = ?, status_code = ?, result_json = ?,"
+                " error = ?, request_id = ? WHERE id = ?",
+                (status, now_iso(), status_code, result_json, error, request_id, job_id))
+            self.conn.commit()
+
+    def requeue_job(self, job_id: int, error=None):
+        with self.lock:
+            self.conn.execute(
+                "UPDATE jobs SET status = 'queued', started_at = NULL, error = ? WHERE id = ?",
+                (error, job_id))
+            self.conn.commit()
+
+    def set_job_callback_status(self, job_id: int, status: str):
+        with self.lock:
+            self.conn.execute("UPDATE jobs SET callback_status = ? WHERE id = ?", (status, job_id))
+            self.conn.commit()
+
+    def cancel_job(self, job_id: int, key_id=None) -> str:
+        """Vrátí 'cancelled', 'running' (běží — zruší ji pracovník), 'done' (už hotová) nebo 'missing'."""
+        with self.lock:
+            r = self.conn.execute("SELECT status, key_id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if r is None or (key_id is not None and r["key_id"] != key_id):
+                return "missing"
+            if r["status"] == "queued":
+                self.conn.execute("UPDATE jobs SET status = 'cancelled', finished_at = ? WHERE id = ?",
+                                  (now_iso(), job_id))
+                self.conn.commit()
+                return "cancelled"
+            return r["status"] if r["status"] == "running" else "done"
+
+    def requeue_running_jobs(self) -> int:
+        """Po startu: úlohy, které běžely při pádu, zpátky do fronty."""
+        with self.lock:
+            cur = self.conn.execute(
+                "UPDATE jobs SET status = 'queued', started_at = NULL,"
+                " error = 'restart proxy during run' WHERE status = 'running'")
+            self.conn.commit()
+            return cur.rowcount
+
+    def jobs_summary(self) -> dict:
+        with self.lock:
+            by_status = {r[0]: r[1] for r in self.conn.execute(
+                "SELECT status, COUNT(*) FROM jobs GROUP BY status")}
+            queued_by_model = {r[0] or "?": r[1] for r in self.conn.execute(
+                "SELECT model, COUNT(*) FROM jobs WHERE status = 'queued' GROUP BY model")}
+            oldest = self.conn.execute(
+                "SELECT MIN(created_at) FROM jobs WHERE status = 'queued'").fetchone()[0]
+        return {"by_status": by_status, "queued_by_model": queued_by_model, "oldest_queued_at": oldest}
+
+    def purge_jobs(self, days: int) -> int:
+        if not days or days <= 0:
+            return 0
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+        with self.lock:
+            cur = self.conn.execute(
+                "DELETE FROM jobs WHERE status IN ('done','error','cancelled') AND finished_at < ?",
+                (cutoff,))
+            self.conn.commit()
+        return cur.rowcount
 
     def get_key_by_hash(self, key_hash: str):
         with self.lock:
@@ -357,10 +569,12 @@ class Database:
                + ", ".join("?" for _ in cols) + ")")
         with self.lock:
             try:
-                self.conn.execute(sql, [row[c] for c in cols])
+                cur = self.conn.execute(sql, [row[c] for c in cols])
                 self.conn.commit()
+                return cur.lastrowid
             except Exception as exc:  # logování nesmí shodit proxy
                 print("log_request failed:", exc, flush=True)
+                return None
 
     @staticmethod
     def _where(filters: dict):

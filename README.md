@@ -25,7 +25,16 @@ Open WebUI / aplikace ──► ollama-proxy :11435 ──► open-webui:11434 (
   OpenRouter, Groq, …) leží jen v proxy; aplikace dostanou proxy klíč `opx_…`.
   Tokeny se čtou z OpenAI, Anthropic i Gemini formátů, volitelně se počítá cena.
 - **API klíče** s rolí `client` (jen dotazy) nebo `admin` (i log a správa),
-  případně omezené na konkrétní poskytovatele.
+  případně omezené na konkrétní poskytovatele a **seznam povolených modelů**
+  (projekt pak nevidí a nesmí použít nic jiného, třeba komerční API).
+- **Plánovač modelů** pro jednu GPU: dotazy na model, který není ve VRAM,
+  počkají, až doběhne model, který ji drží, a pustí se najednou. Projekt, který
+  čekat nechce, pošle `X-Opx-Wait: 0` (dostane 503) nebo se předem zeptá
+  `POST /mgmt/v1/models/load` a dostane `loaded: true/false`.
+- **Fronta úloh pro agenty**: `POST /mgmt/v1/jobs` vrátí id, proxy dotaz vyřídí,
+  až se to hodí (interaktivní provoz má přednost, úlohy se seskupují podle
+  modelu), výsledek `GET /mgmt/v1/jobs/{id}` nebo callback. Limity na klíč:
+  počet čekajících úloh a dotazů za minutu (429).
 - **Self-update z Gitu**: restart kontejneru = `git pull` (viz DEPLOY-TRUENAS.md).
 - Retence logu, změna hesla, vše v GUI nebo přes API.
 
@@ -71,6 +80,146 @@ do Ollamy ho nepřeposílá. Stránka **Spotřeba** (`/ui/usage`, API
 - **Vynucení klíče** pro holé Ollama API zapni v Nastavení až po ověření, že
   Open WebUI s vyplněným klíčem načte modely. Jinak by přestal fungovat.
 
+### Povolené modely u klíče
+
+Každý klíč může mít seznam vzorů modelů (GUI → API klíče, nebo
+`POST /mgmt/v1/keys` s `allowed_models`). Prázdný seznam = všechno.
+
+- `gemma4:12b` přesně; `gemma4` = všechny tagy (`gemma4:12b`, `gemma4:latest`);
+  `qwen3*`, `*-mini` = glob.
+- Dotaz na jiný model (Ollama i poskytovatelé, u Gemini z cesty) dostane
+  `403 {"error": "model 'x' is not allowed for key 'y'"}` a zapíše se do logu
+  se stavem 403, takže je vidět, kdo co zkoušel.
+- Seznamy modelů (`/api/tags`, `/v1/models`, `/mgmt/v1/models`) se klíči ořežou,
+  Open WebUI s takovým klíčem nabídne jen povolené modely.
+- Seznam se dá změnit i u existujícího klíče (GUI v tabulce, nebo
+  `PUT /mgmt/v1/keys/{id}/models`). Klíč omezený na lokální modely se ke
+  komerčním API nedostane, i kdyby měl poskytovatele povolené.
+
+### Plánovač modelů (jedna GPU, víc projektů)
+
+Na 12 GB VRAM se vejde jeden velký model. Když projekty střídají modely, Ollama
+by je přehazovala při každém dotazu (reload 30–90 s). Proxy proto dotazy na
+lokální Ollamu (`/api/chat`, `/api/generate`, `/api/embed*`, `/v1/chat/completions`,
+`/v1/completions`, `/v1/embeddings`) řadí:
+
+1. Dotaz na model, který **GPU drží** (nebo je podle `/api/ps` načtený vedle
+   něj, protože se vejde), jde rovnou.
+2. Dotaz na jiný model **čeká**, dokud neběží nic a neuplyne `sched_hold_s`
+   (výchozí 10 s) od posledního dokončení — navazující tah v konverzaci tak
+   nečeká na reload.
+3. Pak se přepne na model, na který se čeká **nejdéle**, a pustí se všechny
+   jeho čekající dotazy najednou.
+4. Čeká-li někdo déle než `sched_max_wait_s` (výchozí 90 s), nové dotazy na
+   aktuální model se zařadí do fronty, aby GPU uvolnily (ochrana před vyhladověním).
+
+Čekání se zapisuje do logu (`queue_ms`, v detailu záznamu). Nastavení a živý stav
+jsou v GUI → Nastavení, nebo `GET /mgmt/v1/models/status`. Vypnout jde
+`sched_enabled=0`. Komerční poskytovatelé a další Ollama servery přes
+`/providers/` plánovačem neprocházejí.
+
+Projekt, který nechce viset na čekání, má dvě možnosti:
+
+```bash
+# a) nečekat: hlavička X-Opx-Wait (sekundy, 0 = vůbec) → 503 + Retry-After, dotaz se zaloguje se stavem 503
+curl -H "Authorization: Bearer opx_…" -H "X-Opx-Wait: 0" http://server:11435/api/chat -d '{…}'
+
+# b) zeptat se předem: požadavek na načtení modelu
+curl -H "Authorization: Bearer opx_…" -H 'content-type: application/json' \
+  http://server:11435/mgmt/v1/models/load -d '{"model":"gemma4:12b","wait_s":30,"keep_alive":"30m"}'
+# → {"model":"gemma4:12b","loaded":true,"status":"ready","admitted":"gemma4:12b","hold_s":10,…}
+#   loaded=false, status=queued   GPU drží jiný model, který zrovna odpovídá; volej znovu
+#   loaded=false, status=loading  Ollama model nahrává (nikdo ho nepředběhne); volej znovu
+#   loaded=true,  status=ready    pošli dotazy do hold_s sekund, GPU je tvoje
+```
+
+`wait_s` (0–300) říká, jak dlouho smí volání blokovat; s `wait_s` > 0 si projekt
+drží pořadí ve frontě. V Pythonu:
+
+```python
+import time, requests
+H = {"Authorization": "Bearer opx_…"}
+while True:
+    r = requests.post("http://server:11435/mgmt/v1/models/load", headers=H,
+                      json={"model": "gemma4:12b", "wait_s": 30}).json()
+    if r["loaded"]:
+        break
+    time.sleep(2)
+requests.post("http://server:11435/api/chat", headers=H, json={"model": "gemma4:12b", "messages": [...]})
+```
+
+### Fronta úloh pro agenty (hybridní provoz)
+
+Agenti, kterým nevadí odpověď za čtvrt hodiny (periodické dotazy, noční dávka
+OCR), nedrží spojení: pošlou úlohu a proxy si ji vyřídí, až je GPU volná.
+Interaktivní provoz (Open WebUI, SDK, průchozí dotazy) má vždy přednost.
+
+```bash
+# jedna úloha → id hned (202)
+curl -H "$H" -H 'content-type: application/json' http://server:11435/mgmt/v1/jobs \
+  -d '{"path":"/api/chat","body":{"model":"gemma4:12b","messages":[{"role":"user","content":"ahoj"}]},
+       "priority":5,"callback_url":"http://muj-agent:8000/hook","not_before":"2026-09-10T02:00:00+02:00"}'
+# → {"id":42,"batch_id":"a1b2c3d4e5f6","status":"queued"}
+
+# dávka → batch_id; celá dávka i s výsledky jedním voláním
+curl -H "$H" -H 'content-type: application/json' http://server:11435/mgmt/v1/jobs \
+  -d '{"jobs":[{"path":"/api/chat","body":{…}},{"path":"/api/chat","body":{…}}],"priority":7}'
+curl -H "$H" 'http://server:11435/mgmt/v1/jobs?batch=a1b2c3d4e5f6&bodies=1'
+
+curl -H "$H" http://server:11435/mgmt/v1/jobs/42          # status: queued|running|done|error|cancelled, result = odpověď upstreamu
+curl -H "$H" -X DELETE http://server:11435/mgmt/v1/jobs/42
+```
+
+- `path` je cesta, kam by šel průchozí dotaz (`/api/chat`, `/api/generate`,
+  `/api/embed`, `/v1/chat/completions`, `/v1/embeddings`, `/v1/messages`, …),
+  `body` tělo v jeho formátu. `provider` = `ollama` (výchozí) nebo slug
+  poskytovatele; komerční úlohy GPU nepotřebují a jedou hned.
+- Úloha se pošle vždy bez streamu, `result` je celá JSON odpověď. Zapíše se i
+  do běžného logu (tokeny, cena, Spotřeba), v detailu záznamu je odkaz.
+- `callback_url`: po dokončení proxy pošle POST se stejným JSON jako `GET /jobs/{id}`.
+- `not_before`: dřív se nespustí (noční dávka poslaná večer).
+- Klíč `client` vidí jen svoje úlohy. Úlohy přežijí restart (běžící se vrátí do
+  fronty), hotové se mažou po `jobs_retention_days`.
+
+Jak pracovník rozhoduje (GUI → Nastavení → Fronta úloh):
+
+1. Dokud běží nebo čeká interaktivní dotaz, novou úlohu nezačne. Běžící úloha
+   se nechá doběhnout (**měkké přerušení**).
+2. `jobs_preempt_s` > 0 = **tvrdé přerušení**: čeká-li interaktivní dotaz na
+   jiný model déle, běžící úloha se zruší a vrátí do fronty (max. 3 pokusy).
+   Výchozí 0.
+3. `jobs_idle_s` (60 s) po interaktivním dotazu nepřehazuje model kvůli úloze;
+   úlohy na model ve VRAM jedou hned.
+4. Drží se modelu ve VRAM, dokud pro něj má úlohy. Na jiný model přepne, až pro
+   aktuální nic nezbývá, nebo když nejstarší úloha jiného modelu čeká déle než
+   `jobs_max_wait_s` (15 min). Denní OCR dávka tak projede jedním nahráním
+   modelu, pětiminutoví agenti dostanou svůj model nejpozději za 15 minut.
+
+Přehled fronty: GUI → Úlohy, nebo `GET /mgmt/v1/models/status` (sekce `jobs`).
+
+**Limity na klíč** (GUI → API klíče, nebo `PUT /mgmt/v1/keys/{id}`): `max_jobs`
+= strop čekajících úloh, `rate_per_min` = dotazů za minutu (platí pro průchozí
+inference i zadávání úloh). 0 = výchozí z Nastavení (`jobs_max_queued` 200,
+`rate_limit_per_min` 0 = bez limitu). Přes limit `429` + `Retry-After`,
+zaloguje se se stavem 429.
+
+**Klient pro agenty**: [`clients/opx_client.py`](clients/opx_client.py), jen
+standardní knihovna, stačí zkopírovat do projektu.
+
+```python
+from opx_client import OpxClient
+opx = OpxClient("http://ollama-proxy:11435", "opx_…")
+r = opx.chat("gemma4:12b", [{"role": "user", "content": "ahoj"}])          # interaktivně
+jid = opx.submit("/api/chat", {"model": "gemma4:12b", "messages": [...]})   # odloženě
+print(opx.wait(jid)["result"]["message"]["content"])
+batch = opx.submit_batch([{"path": "/api/chat", "body": {...}} for _ in docs], priority=7)
+results = opx.wait_batch(batch, poll=10)
+```
+
+Rada pro průchozí dotazy z agentů na LAN: `stream: true` a timeout jako dvojici
+(krátký na připojení, dlouhý na čtení, třeba 10 s a 900 s). Ticho nastane jen
+na začátku (fronta + nahrání modelu), pak chodí token po tokenu.
+
 ### Komerční API přes proxy
 
 1. GUI → Poskytovatelé → přidat (slug `openai`, typ OpenAI-kompatibilní,
@@ -115,7 +264,11 @@ curl -H "$H" 'http://server:11435/mgmt/v1/requests/123'                     # de
 curl -H "$H" 'http://server:11435/mgmt/v1/stats?since=7d'                   # součty po poskytovatelích, modelech, umístění, klíčích
 curl -H "$H" 'http://server:11435/mgmt/v1/models'                           # modely přes Ollamu i poskytovatele
 curl -H "$H" 'http://server:11435/mgmt/v1/health'                           # stav (placement, load, verze, commit)
-curl -H "$H" -X POST 'http://server:11435/mgmt/v1/keys' -d '{"name":"app","role":"client"}' -H 'content-type: application/json'
+curl -H "$H" -X POST 'http://server:11435/mgmt/v1/keys' -d '{"name":"app","role":"client","allowed_models":["gemma4","nomic-embed-text"]}' -H 'content-type: application/json'
+curl -H "$H" 'http://server:11435/mgmt/v1/models/status'                    # co je v paměti Ollamy, kdo drží GPU, fronta
+curl -H "$H" -X POST 'http://server:11435/mgmt/v1/models/load' -d '{"model":"gemma4:12b","wait_s":30}' -H 'content-type: application/json'
+curl -H "$H" -X POST 'http://server:11435/mgmt/v1/jobs' -d '{"path":"/api/chat","body":{"model":"gemma4:12b","messages":[…]}}' -H 'content-type: application/json'
+curl -H "$H" 'http://server:11435/mgmt/v1/jobs?status=queued'               # fronta úloh; /jobs/{id} = stav + výsledek
 curl -H "$H" -X PUT  'http://server:11435/mgmt/v1/settings' -d '{"retention_days":90}' -H 'content-type: application/json'
 ```
 
@@ -130,8 +283,8 @@ curl -H "$H" -X PUT  'http://server:11435/mgmt/v1/settings' -d '{"retention_days
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / *(prázdné = `admin123`)* | počáteční účet, jen do prázdné DB |
 | `UPDATE_ON_START` / `REPO_URL` / `REPO_BRANCH` | `true` / toto repo / `main` | self-update při startu |
 
-Vše ostatní (poskytovatelé, klíče, retence, vyžadování klíče pro Ollamu) je v DB
-a nastavuje se v GUI nebo přes `/mgmt/v1`.
+Vše ostatní (poskytovatelé, klíče, retence, vyžadování klíče pro Ollamu,
+plánovač modelů) je v DB a nastavuje se v GUI nebo přes `/mgmt/v1`.
 
 ## Databáze
 
@@ -145,11 +298,12 @@ id, ts, endpoint, model, status, prompt_tokens, completion_tokens,
 total_duration_ms, eval_duration_ms, tokens_per_sec, wall_time_ms,
 request_json, response_text,
 placement, vram_pct, loaded_model, load1, load5, mem_avail_pct, concurrent,
-provider, key_name, client_ip, cost_usd, error, client_user
+provider, key_name, client_ip, cost_usd, error, client_user, queue_ms, job_id
 ```
 
 Dále `users`, `api_keys` (jen hash klíče), `providers` (klíč poskytovatele
-v plaintextu — DB je ve volume, chraň ho), `settings`.
+v plaintextu — DB je ve volume, chraň ho), `settings`, `jobs` (fronta úloh
+včetně výsledků).
 
 ## Vývoj
 
@@ -161,5 +315,7 @@ OLLAMA_UPSTREAM=http://localhost:11434 OLLAMA_LOG_DB=./dev.db ADMIN_PASSWORD=dev
 ```
 
 Struktura: `ollamaproxy/proxy.py` (přeposílání a log), `collector.py` (čtení
-tokenů ze streamů), `providers.py` (hlavičky, modely, ceník), `mgmt.py` (JSON
-API), `ui.py` + `templates/` (GUI), `db.py`, `auth.py`, `telemetry.py`.
+tokenů ze streamů), `providers.py` (hlavičky, modely, ceník), `scheduler.py`
+(plánovač modelů), `jobs.py` (fronta úloh, limit dotazů), `mgmt.py` (JSON API),
+`ui.py` + `templates/` (GUI), `db.py`, `auth.py` (klíče, vzory modelů),
+`telemetry.py`, `clients/opx_client.py` (klient pro agenty).

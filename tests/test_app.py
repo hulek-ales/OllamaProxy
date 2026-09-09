@@ -47,6 +47,8 @@ def test_ollama_upstream_down_gives_502(admin, monkeypatch):
     def boom(request):
         raise httpx.ConnectError("refused")
 
+    from ollamaproxy.scheduler import sched
+    sched.last_done = 0.0  # GPU nikdo nedrží → plánovač model "x" pustí hned
     real = admin.app.state.client
     admin.app.state.client = httpx.AsyncClient(transport=httpx.MockTransport(boom))
     try:
@@ -169,7 +171,7 @@ def test_anthropic_stream_logged(admin, client):
 
 def test_models_endpoint(admin):
     out = admin.get("/mgmt/v1/models").json()
-    assert out["ollama"]["models"] == ["gemma4:12b"]
+    assert out["ollama"]["models"] == ["gemma4:12b", "llama3:8b", "nomic-embed-text:latest"]
     assert out["openai"]["models"] == ["gpt-4o-mini"]
 
 
