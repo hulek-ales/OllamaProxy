@@ -24,6 +24,24 @@
   <div class="field"><label for="sched_max_wait_s">Nejdelší čekání ve frontě (s)</label>
     <input type="number" id="sched_max_wait_s" name="sched_max_wait_s" min="0" step="1" value="{{ settings.sched_max_wait_s }}">
     <div class="help">Čeká-li někdo déle, nové dotazy na aktuální model se zařadí do fronty, aby GPU uvolnily.</div></div>
+
+  <h2>Fronta úloh (agenti)</h2>
+  <div class="field"><label><input type="checkbox" name="jobs_enabled" value="1" {{ 'checked' if settings.jobs_enabled == '1' }}> zpracovávat odložené úlohy (<code>POST /mgmt/v1/jobs</code>)</label>
+    <div class="help">Interaktivní dotazy mají vždy přednost. Běžící úloha se nechá doběhnout (měkké přerušení), nová se nezačne, dokud někdo interaktivní čeká.</div></div>
+  <div class="field"><label for="jobs_idle_s">Po interaktivním dotazu nepřehazovat model (s)</label>
+    <input type="number" id="jobs_idle_s" name="jobs_idle_s" min="0" step="1" value="{{ settings.jobs_idle_s }}">
+    <div class="help">Úlohy na jiný model počkají, ať člověk v chatu nedostane reload uprostřed konverzace. Úlohy na model ve VRAM jedou hned.</div></div>
+  <div class="field"><label for="jobs_max_wait_s">Nejdelší čekání úlohy jiného modelu (s)</label>
+    <input type="number" id="jobs_max_wait_s" name="jobs_max_wait_s" min="0" step="1" value="{{ settings.jobs_max_wait_s }}">
+    <div class="help">Pracovník se drží modelu ve VRAM, dokud pro něj má úlohy. Po této době přepne i tak (spravedlnost mezi projekty).</div></div>
+  <div class="field"><label for="jobs_preempt_s">Tvrdé přerušení: zrušit běžící úlohu, když interaktivní dotaz čeká déle než (s; 0 = vypnuto)</label>
+    <input type="number" id="jobs_preempt_s" name="jobs_preempt_s" min="0" step="1" value="{{ settings.jobs_preempt_s }}">
+    <div class="help">Úloha se vrátí do fronty (rozdělaná generace propadne, max. 3 pokusy).</div></div>
+  <div class="field" style="display:flex;gap:16px;flex-wrap:wrap">
+    <label>Výchozí max. čekajících úloh na klíč <input type="number" name="jobs_max_queued" min="0" value="{{ settings.jobs_max_queued }}" style="width:90px"></label>
+    <label>Výchozí dotazů za minutu na klíč (0 = bez limitu) <input type="number" name="rate_limit_per_min" min="0" value="{{ settings.rate_limit_per_min }}" style="width:90px"></label>
+    <label>Mazat hotové úlohy po (dní; 0 = nemazat) <input type="number" name="jobs_retention_days" min="0" value="{{ settings.jobs_retention_days }}" style="width:90px"></label>
+  </div>
   <button>Uložit</button>
 </form>
 </div>
@@ -36,6 +54,9 @@
   <div>běží</div><div>{% for m, n in sched.in_flight.items() %}{{ m }} × {{ n }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</div>
   <div>čeká</div><div>{% for m, n in sched.waiting.items() %}{{ m }} × {{ n }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}{% if sched.oldest_wait_s %} <span class="mute">(nejdéle {{ sched.oldest_wait_s }} s)</span>{% endif %}</div>
   <div>přepnutí modelu</div><div>{{ sched.switches }}</div>
+  <div>úlohy</div><div>{% if jobs.running %}běží #{{ jobs.running.id }} ({{ jobs.running.model }}, {{ jobs.running.key_name }}){% else %}nic neběží{% endif %};
+    ve frontě {{ jobs.by_status.get('queued', 0) }}{% if jobs.queued_by_model %} ({% for m, n in jobs.queued_by_model.items() %}{{ m }} × {{ n }}{{ ', ' if not loop.last }}{% endfor %}){% endif %};
+    hotovo {{ jobs.runs }}, přerušeno {{ jobs.preempted }} · <a href="/ui/jobs">Úlohy</a></div>
 </div>
 <p class="help">Totéž přes API: <code>GET /mgmt/v1/models/status</code>. Projekt, který nechce čekat, pošle <code>X-Opx-Wait: 0</code> (dostane 503) nebo se předem zeptá <code>POST /mgmt/v1/models/load</code>.</p>
 </div>

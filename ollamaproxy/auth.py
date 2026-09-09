@@ -113,6 +113,8 @@ class Principal:
     models: list = field(default_factory=list)     # glob vzory modelů; prázdné = všechny
     key_id: int = None
     user_id: int = None
+    rate_per_min: int = 0                          # 0 = výchozí z nastavení
+    max_jobs: int = 0                              # 0 = výchozí z nastavení
 
     @property
     def is_admin(self) -> bool:
@@ -149,7 +151,9 @@ def principal_from_request(request, db):
             db.touch_key(row["id"])
             allowed = [s for s in (row["allowed_providers"] or "").split(",") if s]
             models = parse_model_patterns(row.get("allowed_models") or "")
-            return Principal("key", row["name"], row["role"], allowed, models, key_id=row["id"])
+            return Principal("key", row["name"], row["role"], allowed, models, key_id=row["id"],
+                             rate_per_min=int(row.get("rate_per_min") or 0),
+                             max_jobs=int(row.get("max_jobs") or 0))
         return None  # klíč vypadá jako náš, ale neplatí → nepouštět dál
     uid = parse_session(db.secret, request.cookies.get(SESSION_COOKIE))
     if uid is not None:

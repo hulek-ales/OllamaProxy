@@ -22,11 +22,12 @@ import time
 
 
 class Waiter:
-    __slots__ = ("model", "since", "event")
+    __slots__ = ("model", "since", "event", "interactive")
 
-    def __init__(self, model: str, since: float):
+    def __init__(self, model: str, since: float, interactive: bool = True):
         self.model = model
         self.since = since
+        self.interactive = interactive
         self.event = asyncio.Event()
 
 
@@ -39,7 +40,9 @@ class ModelScheduler:
         self.draining = False         # někdo hladoví → nové dotazy na admitted čekají
         self.in_flight = {}           # model → počet běžících dotazů
         self.waiting = []             # Waiter v pořadí příchodu
-        self.last_done = 0.0          # monotonic čas posledního dokončení
+        self.last_done = 0.0          # monotonic čas posledního dokončení (interaktivní i úlohy)
+        self.last_interactive_done = 0.0
+        self.interactive_running = 0  # kolik z in_flight jsou interaktivní dotazy (ne úlohy)
         self.switches = 0
         self.loaded_probe = None      # async () → iterable názvů modelů načtených v Ollamě
         self._ps_cache = (0.0, frozenset())
@@ -79,9 +82,13 @@ class ModelScheduler:
             "admitted": self.admitted,
             "draining": self.draining,
             "in_flight": dict(self.in_flight),
+            "interactive_running": self.interactive_running,
+            "interactive_waiting": sum(1 for w in self.waiting if w.interactive),
             "waiting": waiting,
             "oldest_wait_s": round(now - oldest, 1) if oldest is not None else 0.0,
             "idle_s": round(now - self.last_done, 1) if self.last_done else None,
+            "interactive_idle_s": (round(now - self.last_interactive_done, 1)
+                                   if self.last_interactive_done else None),
             "hold_s": self.hold_s,
             "max_wait_s": self.max_wait_s,
             "switches": self.switches,
@@ -89,19 +96,31 @@ class ModelScheduler:
 
     # ------------------------------------------------------- acquire/release
 
-    async def acquire(self, model: str, timeout: float = None, since: float = None) -> float:
+    def interactive_pending(self) -> bool:
+        """Běží nebo čeká nějaký interaktivní dotaz (ne úloha z fronty)?"""
+        return self.interactive_running > 0 or any(w.interactive for w in self.waiting)
+
+    def oldest_interactive_wait_s(self) -> float:
+        now = time.monotonic()
+        waits = [now - w.since for w in self.waiting if w.interactive]
+        return max(waits) if waits else 0.0
+
+    async def acquire(self, model: str, timeout: float = None, since: float = None,
+                      interactive: bool = True) -> float:
         """Počká, až smí dotaz na `model` do Ollamy, a započítá ho mezi běžící.
         Vrátí, kolik sekund čekal. Po vypršení `timeout` zvedne TimeoutError
         (dotaz pak započítaný není). `since` posune „stáří“ čekání — pro
-        opakované dotazy z /models/load, aby nepřicházely o pořadí."""
+        opakované dotazy z /models/load, aby nepřicházely o pořadí.
+        `interactive=False` = úloha z fronty (jobs.py): má nižší prioritu a
+        nedrží GPU po dokončení (hold platí jen po interaktivním dotazu)."""
         if not self.enabled or not model:
-            self._start(model)
+            self._start(model, interactive)
             return 0.0
         t0 = time.monotonic()
         if await self._can_run(model):
-            self._start(model)
+            self._start(model, interactive)
             return 0.0
-        w = Waiter(model, since if since is not None else t0)
+        w = Waiter(model, since if since is not None else t0, interactive)
         self.waiting.append(w)
         try:
             while True:
@@ -118,14 +137,14 @@ class ModelScheduler:
                     pass
         except BaseException:
             if w.event.is_set():   # už jsme byli pušteni a započítáni → vrátit
-                self.release(model)
+                self.release(model, interactive)
             raise
         finally:
             if w in self.waiting:
                 self.waiting.remove(w)
         return time.monotonic() - t0
 
-    def release(self, model: str):
+    def release(self, model: str, interactive: bool = True):
         """Dotaz doběhl. Když někdo čeká, hned zkusí přepnout."""
         if not model:
             return
@@ -135,6 +154,9 @@ class ModelScheduler:
         else:
             self.in_flight.pop(model, None)
         self.last_done = time.monotonic()
+        if interactive:
+            self.interactive_running = max(0, self.interactive_running - 1)
+            self.last_interactive_done = self.last_done
         if self.waiting:
             try:
                 asyncio.get_running_loop().create_task(self._maybe_switch())
@@ -143,9 +165,11 @@ class ModelScheduler:
 
     # ---------------------------------------------------------------- vnitřek
 
-    def _start(self, model):
+    def _start(self, model, interactive: bool = True):
         if model:
             self.in_flight[model] = self.in_flight.get(model, 0) + 1
+            if interactive:
+                self.interactive_running += 1
 
     async def _can_run(self, model: str) -> bool:
         if self.admitted is None:
@@ -163,14 +187,17 @@ class ModelScheduler:
         if not self.waiting:
             return
         now = time.monotonic()
-        oldest = min(self.waiting, key=lambda w: w.since)
+        # interaktivní dotazy mají přednost před úlohami z fronty
+        pool = [w for w in self.waiting if w.interactive] or self.waiting
+        oldest = min(pool, key=lambda w: w.since)
         starving = now - oldest.since > self.max_wait_s
         if sum(self.in_flight.values()) > 0:
             if starving:
                 self.draining = True
             return
-        if not starving and self.admitted is not None and now - self.last_done < self.hold_s:
-            # GPU drží model, který právě odpovídal — chvíli počkat, jestli nepřijde další tah
+        if (not starving and self.admitted is not None
+                and now - self.last_interactive_done < self.hold_s):
+            # GPU drží model, který právě odpovídal člověku — chvíli počkat na další tah
             if self.admitted in await self.loaded():
                 return
         self._switch_to(oldest.model)
@@ -183,6 +210,7 @@ class ModelScheduler:
         self.waiting = [w for w in self.waiting if w.model != model]
         # započítat hned tady, aby další _maybe_switch nepřepnul dřív, než se dotazy rozběhnou
         self.in_flight[model] = self.in_flight.get(model, 0) + len(released)
+        self.interactive_running += sum(1 for w in released if w.interactive)
         for w in released:
             w.event.set()
 

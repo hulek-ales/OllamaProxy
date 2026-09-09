@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Úloha {{ jid }}{% endblock %}
+{% block content %}
+{% if job is none %}
+<h1>Úloha {{ jid }} neexistuje</h1><p><a href="/ui/jobs">Zpět na úlohy</a></p>
+{% else %}
+<h1>Úloha {{ jid }}</h1>
+<p class="sub"><a href="/ui/jobs">&larr; zpět na úlohy</a></p>
+<div class="kv">
+  <div>stav</div><div class="{{ 'err' if job.status == 'error' }}">{{ job.status }}</div>
+  <div>dávka</div><div><a href="/ui/jobs?batch={{ job.batch_id }}">{{ job.batch_id }}</a></div>
+  <div>zdroj / cesta</div><div>{{ job.provider }} {{ job.path }}</div>
+  <div>model</div><div>{{ job.model or '—' }}</div>
+  <div>klient</div><div>{{ job.key_name or '—' }}</div>
+  <div>priorita</div><div>{{ job.priority }}</div>
+  <div>vytvořena / začátek / konec</div><div>{{ job.created_at | ts }} / {{ job.started_at | ts if job.started_at else '—' }} / {{ job.finished_at | ts if job.finished_at else '—' }}</div>
+  {% if job.not_before %}<div>nejdřív</div><div>{{ job.not_before | ts }}</div>{% endif %}
+  <div>pokusy</div><div>{{ job.attempts }}</div>
+  {% if job.status_code %}<div>HTTP stav upstreamu</div><div>{{ job.status_code }}</div>{% endif %}
+  {% if job.error %}<div>chyba</div><div class="err">{{ job.error }}</div>{% endif %}
+  {% if job.request_id %}<div>záznam v logu</div><div><a href="/ui/r/{{ job.request_id }}">{{ job.request_id }}</a></div>{% endif %}
+  {% if job.callback_url %}<div>callback</div><div>{{ job.callback_url }} <span class="mute">{{ job.callback_status or '' }}</span></div>{% endif %}
+</div>
+{% if pretty.request %}<h2>Dotaz</h2><pre>{{ pretty.request }}</pre>{% endif %}
+{% if pretty.result %}<h2>Výsledek</h2><pre>{{ pretty.result }}</pre>{% endif %}
+{% endif %}
+{% endblock %}

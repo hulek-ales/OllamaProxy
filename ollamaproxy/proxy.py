@@ -25,6 +25,7 @@ from . import config
 from .auth import principal_from_request, uses_proxy_key
 from .collector import Collector
 from .db import db, now_iso
+from .jobs import limiter
 from .providers import auth_headers, cost_usd, parse_pricing
 from .scheduler import sched
 from .telemetry import active, bump, gpu_snapshot, host_snapshot
@@ -151,6 +152,27 @@ def _base_row(request: Request, provider: str, principal, req_obj: dict, log_bod
         "client_user": client_user(request),
         "request_json": json.dumps(req_obj, ensure_ascii=False) if log_bodies else None,
     }
+
+
+def rate_limited(request: Request, provider: str, principal, model, req_obj: dict):
+    """429 při překročení limitu dotazů za minutu (jen klíče, jen inference)."""
+    if principal is None or principal.kind != "key":
+        return None
+    if not (request.method == "POST" and INFERENCE_RE.search(request.url.path)):
+        return None
+    limit = principal.rate_per_min
+    if not limit:
+        try:
+            limit = int(float(db.setting("rate_limit_per_min") or 0))
+        except ValueError:
+            limit = 0
+    retry = limiter.hit(principal.key_id, limit)
+    if retry is None:
+        return None
+    msg = "rate limit " + str(limit) + "/min exceeded for key '" + principal.name + "'"
+    db.log_request({"ts": now_iso(), "model": model, "status": 429, "wall_time_ms": 0.0, "error": msg,
+                    **_base_row(request, provider, principal, req_obj, db.setting("log_bodies") == "1")})
+    return JSONResponse({"error": msg}, status_code=429, headers={"Retry-After": str(retry)})
 
 
 def deny_model(request: Request, provider: str, principal, model: str, req_obj: dict):
@@ -311,6 +333,9 @@ async def provider_proxy(slug: str, path: str, request: Request):
     model = request_model("/" + path, req_obj)
     if model and not principal.may_model(model):
         return deny_model(request, slug, principal, model, req_obj)
+    limited = rate_limited(request, slug, principal, model, req_obj)
+    if limited is not None:
+        return limited
 
     incoming = {k: v for k, v in request.headers.items()
                 if k.lower() not in STRIP_REQUEST and k.lower() not in CLIENT_AUTH}
@@ -341,6 +366,9 @@ async def ollama_proxy(path: str, request: Request):
     model = request_model("/" + path, req_obj)
     if model and principal is not None and not principal.may_model(model):
         return deny_model(request, "ollama", principal, model, req_obj)
+    limited = rate_limited(request, "ollama", principal, model, req_obj)
+    if limited is not None:
+        return limited
 
     skip = set(STRIP_REQUEST)
     if uses_proxy_key(request):

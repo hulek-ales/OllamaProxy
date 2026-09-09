@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -29,10 +30,27 @@ class Upstream:
 
     def __init__(self):
         self.calls = []
+        self.callbacks = []
+        self.slow_s = 1.5   # model "slow" odpovídá tak dlouho (test přerušení úloh)
 
-    def handler(self, request: httpx.Request) -> httpx.Response:
+    async def handler(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request)
         host, path = request.url.host, request.url.path
+        if host == "callback.test":
+            self.callbacks.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True})
+        if host == "ollama.test" and path == "/api/chat":
+            body = json.loads(request.content)
+            if body.get("model") == "slow":
+                await asyncio.sleep(self.slow_s)
+                return httpx.Response(200, json={
+                    "model": "slow", "message": {"role": "assistant", "content": "pomalu"}, "done": True,
+                    "prompt_eval_count": 3, "eval_count": 1})
+            if not body.get("stream", True):
+                return httpx.Response(200, json={
+                    "model": body.get("model"), "message": {"role": "assistant", "content": "Ahoj!"},
+                    "done": True, "prompt_eval_count": 12, "eval_count": 2,
+                    "total_duration": 2_000_000_000, "eval_duration": 1_000_000_000})
         if host == "ollama.test":
             if path == "/api/ps":
                 return httpx.Response(200, json={"models": [

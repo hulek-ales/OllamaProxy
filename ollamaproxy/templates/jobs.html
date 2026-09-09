@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Úlohy{% endblock %}
+{% block content %}
+<h1>Úlohy</h1>
+<p class="sub">Odložené dotazy agentů (<code>POST /mgmt/v1/jobs</code>). Interaktivní dotazy mají přednost, úlohy se seskupují podle modelu.
+{% if jobs.running %}Teď běží <a href="/ui/jobs/{{ jobs.running.id }}">#{{ jobs.running.id }}</a> ({{ jobs.running.model }}, {{ jobs.running.key_name }}).{% else %}Teď nic neběží.{% endif %}
+Ve frontě {{ jobs.by_status.get('queued', 0) }}, hotovo od startu {{ jobs.runs }}, přerušeno {{ jobs.preempted }}.
+{% if sched.interactive_running or sched.interactive_waiting %} Interaktivní provoz: běží {{ sched.interactive_running }}, čeká {{ sched.interactive_waiting }} — úlohy stojí.{% endif %}</p>
+
+<form class="bar" method="get" action="/ui/jobs">
+  <select name="status">
+    <option value="">všechny stavy</option>
+    {% for st in ('queued', 'running', 'done', 'error', 'cancelled') %}<option value="{{ st }}" {{ 'selected' if status == st }}>{{ st }}</option>{% endfor %}
+  </select>
+  <input type="text" name="batch" value="{{ batch }}" placeholder="dávka (batch_id)">
+  <button>Filtrovat</button> <span class="mute">{{ total }} úloh</span>
+</form>
+
+<div class="tblwrap">
+<table>
+<tr><th>id<th>dávka<th>stav<th>prio<th>zdroj<th>model<th>klient<th>vytvořena<th>začátek<th>konec<th class="num">pokusy<th>chyba<th></tr>
+{% for j in rows %}
+<tr>
+  <td><a href="/ui/jobs/{{ j.id }}">{{ j.id }}</a><td><a href="/ui/jobs?batch={{ j.batch_id }}">{{ j.batch_id }}</a>
+  <td class="{{ 'err' if j.status == 'error' }}">{{ j.status }}<td>{{ j.priority }}<td>{{ j.provider }}<td>{{ j.model or '—' }}<td>{{ j.key_name or '—' }}
+  <td>{{ j.created_at | ts }}<td>{{ j.started_at | ts if j.started_at else '—' }}<td>{{ j.finished_at | ts if j.finished_at else '—' }}
+  <td class="num">{{ j.attempts }}<td class="err">{{ (j.error or '')[:80] }}
+  <td>{% if j.status in ('queued', 'running') %}<form method="post" action="/ui/jobs/{{ j.id }}/cancel"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link danger">zrušit</button></form>{% endif %}
+</tr>
+{% else %}
+<tr><td colspan="13">Žádné úlohy.</td></tr>
+{% endfor %}
+</table>
+</div>
+{% endblock %}
