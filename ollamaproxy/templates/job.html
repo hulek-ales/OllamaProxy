@@ -19,6 +19,7 @@
   {% if job.status_code %}<div>HTTP stav upstreamu</div><div>{{ job.status_code }}</div>{% endif %}
   {% if job.error %}<div>chyba</div><div class="err">{{ job.error }}</div>{% endif %}
   {% if job.request_id %}<div>záznam v logu</div><div><a href="/ui/r/{{ job.request_id }}">{{ job.request_id }}</a></div>{% endif %}
+  {% if job.result_url %}<div>soubor s výsledkem</div><div><a href="{{ job.result_url }}">{{ job.result_url }}</a>{% if job.result and job.result.bytes %} <span class="mute">({{ job.result.content_type }}, {{ job.result.bytes | num }} B)</span>{% endif %}</div>{% endif %}
   {% if job.callback_url %}<div>callback</div><div>{{ job.callback_url }} <span class="mute">{{ job.callback_status or '' }}</span></div>{% endif %}
 </div>
 {% if pretty.request %}<h2>Dotaz</h2><pre>{{ pretty.request }}</pre>{% endif %}

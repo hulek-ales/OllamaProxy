@@ -10,14 +10,15 @@ Autentizace: `Authorization: Bearer opx_…` (klíč z GUI → API klíče) nebo
 | GET | `/requests/{id}` | client | jeden záznam včetně textů |
 | GET | `/stats?since=24h` | client | součty a průměry: celkem (`total`), `by_provider`, `by_model`, `by_placement`, `by_key`, `by_user` (hlavička Open WebUI), `by_key_model` (spotřeba aplikace na každém modelu) |
 | GET | `/models` | client | modely dostupné přes proxy (Ollama + zapnutí poskytovatelé) a jejich `base_url`; ořezané na modely povolené klíči |
-| GET | `/models/status` | client | plánovač lokální Ollamy: `loaded` (z `/api/ps`), `admitted` (kdo drží GPU), `in_flight`, `waiting` (fronta po modelech), `oldest_wait_s`, `draining`, `hold_s`, `max_wait_s`, `switches` |
+| GET | `/models/status` | client | plánovač: `loaded` (Ollama `/api/ps` + GPU služby), `admitted` (kdo drží GPU) + `backend` (`ollama` nebo slug služby), `evicting` (přepíná se, starý backend uvolňuje VRAM), `in_flight`, `waiting` (fronta po modelech), `oldest_wait_s`, `draining`, `hold_s`, `max_wait_s`, `switches`, `evictions`, `last_evict_error`, `backends` (po službách: `ok`, `loaded`, `models`) |
 | POST | `/jobs` | client | odložená úloha `{path, body, provider?, priority?, callback_url?, not_before?}` nebo dávka `{jobs: [...], priority?, callback_url?, not_before?}` → 202 `{id, batch_id}`; 429 při překročení `max_jobs` / `rate_per_min` klíče |
 | GET | `/jobs` | client | seznam (client jen svoje); `status`, `batch`, `limit`, `offset`, `bodies=1` (i dotaz a výsledek), `finished` = kolik z vrácených je hotových |
-| GET | `/jobs/{id}` | client | stav (`queued|running|done|error|cancelled`), `result` = celá odpověď upstreamu, `request_id` = záznam v logu, `callback_status` |
+| GET | `/jobs/{id}` | client | stav (`queued|running|done|error|cancelled`), `result` = celá odpověď upstreamu (u binární odpovědi `{file, content_type, bytes}` a `result_url`), `request_id` = záznam v logu, `callback_status` |
+| GET | `/jobs/{id}/result` | client | soubor s binárním výsledkem (audio z `/v1/audio/speech`); 404, když úloha soubor nemá |
 | DELETE | `/jobs/{id}` | client | zruší čekající i běžící úlohu |
 | POST | `/models/load` | client | `{model, wait_s: 0–300, keep_alive?}` → `{loaded: bool, status: ready|queued|loading|error, admitted, hold_s, …}`; model musí být klíči povolený |
 | GET | `/providers` | client | poskytovatelé (klíč jen maskovaný) |
-| POST | `/providers` | admin | `{slug, name, kind, base_url, api_key, pricing, inject_usage, enabled}` |
+| POST | `/providers` | admin | `{slug, name, kind, base_url, api_key, pricing, inject_usage, enabled, models}`; `kind: gpu` = lokální GPU služba sdílející kartu s Ollamou, `models` (názvy/vzory, povinné) určují, které dotazy se do ní směrují — viz [GPU-BACKEND.md](GPU-BACKEND.md) |
 | PUT | `/providers/{slug}` | admin | totéž; `api_key` vynechat = neměnit, `""` = smazat |
 | DELETE | `/providers/{slug}` | admin | |
 | POST | `/providers/{slug}/test` | admin | zkusí vypsat modely upstreamu |
@@ -26,14 +27,14 @@ Autentizace: `Authorization: Bearer opx_…` (klíč z GUI → API klíče) nebo
 | PUT | `/keys/{id}` | admin | `{allowed_models?, max_jobs?, rate_per_min?}` — změna omezení existujícího klíče (0 = výchozí z nastavení) |
 | PUT | `/keys/{id}/models` | admin | `{allowed_models: []}` — jen seznam modelů |
 | DELETE | `/keys/{id}` | admin | |
-| GET / PUT | `/settings` | admin | `retention_days`, `log_bodies`, `ollama_require_key`, `sched_enabled`, `sched_hold_s`, `sched_max_wait_s`, `jobs_enabled`, `jobs_max_wait_s`, `jobs_idle_s`, `jobs_preempt_s`, `jobs_max_queued`, `jobs_retention_days`, `rate_limit_per_min` |
+| GET / PUT | `/settings` | admin | `retention_days`, `log_bodies`, `ollama_require_key`, `sched_enabled`, `sched_hold_s`, `sched_max_wait_s`, `jobs_enabled`, `jobs_max_wait_s`, `jobs_idle_s`, `jobs_preempt_s`, `jobs_max_queued`, `jobs_retention_days`, `rate_limit_per_min`, `gpu_evict_timeout_s` (čekání na uvolnění VRAM při přepnutí backendu), `gpu_request_timeout_s` (nejdelší ticho dotazu na GPU službu) |
 
-Inference (loguje se automaticky):
+Inference (loguje se automaticky; i `/audio/speech`, `/audio/transcriptions`):
 
 | cesta | kam jde | klíč | plánovač |
 |---|---|---|---|
-| `/api/*`, `/v1/*` (kořen) | `OLLAMA_UPSTREAM` | nepovinný (nastavení `ollama_require_key`) | ano (POST na chat/generate/embed) |
-| `/providers/{slug}/…` | `base_url` poskytovatele + zbytek cesty | povinný; proxy ho nahradí klíčem poskytovatele | ne |
+| `/api/*`, `/v1/*` (kořen) | `OLLAMA_UPSTREAM`; POST s modelem GPU služby → její `base_url` | nepovinný (nastavení `ollama_require_key`); pro GPU službu povinný | ano (POST na chat/generate/embed; GPU služba: každý POST s modelem) |
+| `/providers/{slug}/…` | `base_url` poskytovatele + zbytek cesty | povinný; proxy ho nahradí klíčem poskytovatele | jen typ `gpu` |
 
 Hlavička `X-Opx-Wait: <s>` omezí čekání v plánovači (0 = nečekat); do upstreamu se nepřeposílá.
 Klíč s `allowed_models` vidí v `/api/tags`, `/v1/models` a `/v1beta/models` jen povolené modely.

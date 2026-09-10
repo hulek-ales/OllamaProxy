@@ -9,6 +9,8 @@ VERSION = __version__
 # kam se posílá holé Ollama API (kořen proxy)
 UPSTREAM = os.environ.get("OLLAMA_UPSTREAM", "http://open-webui:11434").rstrip("/")
 DB_PATH = os.environ.get("OLLAMA_LOG_DB", "/data/ollama_log.db")
+# binární výsledky úloh (audio z TTS…) — vedle databáze, ať jsou ve stejném volume
+JOBS_DIR = os.environ.get("OLLAMA_JOBS_DIR", os.path.join(os.path.dirname(DB_PATH) or ".", "jobs"))
 
 # výchozí hodnoty nastavení; po prvním startu se dají měnit v GUI / API
 LOG_BODIES_DEFAULT = "1" if os.environ.get("OLLAMA_LOG_BODIES", "1") == "1" else "0"

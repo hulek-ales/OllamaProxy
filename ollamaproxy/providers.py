@@ -1,4 +1,14 @@
-"""Komerční (a další) upstreamy: hlavičky s klíčem, výpis modelů, ceník."""
+"""Komerční (a další) upstreamy: hlavičky s klíčem, výpis modelů, ceník.
+
+Typ `gpu` je lokální služba (TTS, Whisper…), která sdílí grafiku s hlavní Ollamou.
+Dotazy na její modely jdou přes plánovač modelů a proxy jí před přepnutím řekne,
+ať uvolní VRAM. Služba musí umět (viz docs/GPU-BACKEND.md):
+
+    GET  /v1/models    {"data": [{"id": "tts-cs"}]}          seznam modelů
+    GET  /api/ps       {"models": [{"name": "tts-cs", …}]}    co má v paměti (jako Ollama)
+    POST /api/unload   {"model"?: "tts-cs"}                   uvolnit VRAM (bez modelu = vše)
+    POST /api/load     {"model": "tts-cs"}                    nepovinné; jinak nahraje první dotaz
+"""
 
 import json
 
@@ -9,6 +19,7 @@ KIND_LABELS = {
     "anthropic": "Anthropic (Claude)",
     "google": "Google Gemini",
     "ollama": "Další Ollama (jiný server)",
+    "gpu": "Lokální GPU služba (TTS, Whisper…) — sdílí kartu s Ollamou, jde přes plánovač",
 }
 
 DEFAULT_BASE_URL = {
@@ -16,6 +27,7 @@ DEFAULT_BASE_URL = {
     "anthropic": "https://api.anthropic.com",
     "google": "https://generativelanguage.googleapis.com",
     "ollama": "http://ollama:11434",
+    "gpu": "http://tts:8000",
 }
 
 ANTHROPIC_VERSION = "2023-06-01"
@@ -39,10 +51,47 @@ def auth_headers(kind: str, api_key: str, incoming: dict) -> dict:
 
 def client_base_url(proxy_root: str, slug: str, kind: str) -> str:
     """Co má aplikace nastavit jako base_url, aby šla přes proxy."""
+    if kind == "gpu":
+        # směruje se podle modelu: stejná adresa jako Ollama, proxy pozná model služby
+        return proxy_root.rstrip("/") + "/v1"
     root = proxy_root.rstrip("/") + "/providers/" + slug
     if kind in ("openai",):
         return root + "/v1"
     return root
+
+
+def provider_models(row: dict) -> list:
+    """Vzory modelů GPU služby ze sloupce `models`."""
+    return [p for p in (row.get("models") or "").split(",") if p]
+
+
+# ------------------------------------------------ kontrakt GPU služby
+
+async def backend_ps(client: httpx.AsyncClient, base_url: str, api_key: str) -> list:
+    """Modely, které GPU služba drží v paměti (GET /api/ps, stejný tvar jako Ollama)."""
+    r = await client.get(base_url.rstrip("/") + "/api/ps", headers=auth_headers("gpu", api_key, {}),
+                         timeout=5.0)
+    r.raise_for_status()
+    return [m.get("name") or m.get("model") for m in r.json().get("models") or []
+            if m.get("name") or m.get("model")]
+
+
+async def backend_unload(client: httpx.AsyncClient, base_url: str, api_key: str, model: str = None):
+    """Řekne službě, ať uvolní VRAM (POST /api/unload). Vrátí se, až je hotovo."""
+    body = {"model": model} if model else {}
+    r = await client.post(base_url.rstrip("/") + "/api/unload", json=body,
+                          headers=auth_headers("gpu", api_key, {}), timeout=120.0)
+    r.raise_for_status()
+
+
+async def backend_load(client: httpx.AsyncClient, base_url: str, api_key: str, model: str) -> bool:
+    """POST /api/load — nepovinné; 404 = služba model nahraje sama při prvním dotazu."""
+    r = await client.post(base_url.rstrip("/") + "/api/load", json={"model": model},
+                          headers=auth_headers("gpu", api_key, {}), timeout=600.0)
+    if r.status_code == 404:
+        return False
+    r.raise_for_status()
+    return True
 
 
 async def fetch_models(client: httpx.AsyncClient, kind: str, base_url: str, api_key: str) -> list:

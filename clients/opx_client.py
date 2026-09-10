@@ -19,6 +19,11 @@
 
     # jen se zeptat, jestli je model nahraný (true/false), bez čekání
     opx.model_loaded("gemma4:12b")
+
+    # GPU služba vedle Ollamy (TTS): proxy sama uvolní Ollamu a pak zase službu
+    mp3 = opx.speak("tts-cs", "Dobré ráno…", voice="jirka")         # bytes, hned
+    jid = opx.submit("/v1/audio/speech", {"model": "tts-cs", "input": "…"})   # odloženě
+    opx.wait(jid); opx.download(jid, "/podcast/dnes.mp3")           # výsledek je soubor
 """
 
 import json
@@ -42,7 +47,8 @@ class OpxClient:
 
     # ------------------------------------------------------------ HTTP
 
-    def _call(self, method: str, path: str, body=None, headers=None, timeout=None):
+    def _raw(self, method: str, path: str, body=None, headers=None, timeout=None):
+        """Vrátí (bytes, content-type); HTTP chyba → OpxError."""
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.base + path, data=data, method=method)
         req.add_header("Authorization", "Bearer " + self.key)
@@ -51,7 +57,7 @@ class OpxClient:
             req.add_header(k, v)
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
-                raw = resp.read()
+                return resp.read(), resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as exc:
             raw = exc.read()
             try:
@@ -59,6 +65,9 @@ class OpxClient:
             except Exception:
                 parsed = raw.decode("utf-8", "replace")
             raise OpxError(exc.code, parsed) from None
+
+    def _call(self, method: str, path: str, body=None, headers=None, timeout=None):
+        raw, _ = self._raw(method, path, body, headers, timeout)
         return json.loads(raw) if raw else None
 
     # ----------------------------------------------------- interaktivně
@@ -84,6 +93,16 @@ class OpxClient:
     def status(self) -> dict:
         return self._call("GET", "/mgmt/v1/models/status")
 
+    def speak(self, model: str, text: str, voice=None, wait_s=None, **extra) -> bytes:
+        """Syntéza řeči přes GPU službu (docs/GPU-BACKEND.md). Vrátí audio bytes.
+        Proxy před tím uvolní Ollamu z VRAM a chat mezitím čeká — jeden díl = jeden dotaz."""
+        body = {"model": model, "input": text, **extra}
+        if voice is not None:
+            body["voice"] = voice
+        headers = {"X-Opx-Wait": str(wait_s)} if wait_s is not None else None
+        audio, _ = self._raw("POST", "/v1/audio/speech", body, headers)
+        return audio
+
     # --------------------------------------------------------- úlohy
 
     def submit(self, path: str, body: dict, provider: str = "ollama", priority: int = 5,
@@ -108,6 +127,13 @@ class OpxClient:
 
     def cancel(self, job_id: int) -> dict:
         return self._call("DELETE", "/mgmt/v1/jobs/" + str(job_id))
+
+    def download(self, job_id: int, dest: str) -> str:
+        """Binární výsledek úlohy (audio) do souboru `dest`. Vrátí content-type."""
+        raw, content_type = self._raw("GET", "/mgmt/v1/jobs/" + str(job_id) + "/result")
+        with open(dest, "wb") as f:
+            f.write(raw)
+        return content_type
 
     def wait(self, job_id: int, poll: float = 5.0, timeout: float = None) -> dict:
         """Čeká, dokud úloha není done/error/cancelled. Vrátí ji včetně `result`."""

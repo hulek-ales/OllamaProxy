@@ -2,12 +2,12 @@
 {% block title %}Poskytovatelé{% endblock %}
 {% block content %}
 <h1>Poskytovatelé</h1>
-<p class="sub">Komerční API a další servery, které proxy zastupuje. Aplikace se hlásí proxy klíčem, skutečný klíč poskytovatele zůstává tady.</p>
+<p class="sub">Komerční API a další servery, které proxy zastupuje. Aplikace se hlásí proxy klíčem, skutečný klíč poskytovatele zůstává tady. Typ <b>gpu</b> = lokální služba (TTS, Whisper…), která sdílí kartu s Ollamou: její modely se směrují podle názvu a jdou přes plánovač.</p>
 
 <div class="tblwrap">
 <table>
-<tr><th>id<th>název<th>typ<th>upstream<th>klíč<th>base_url pro aplikace<th>ceník<th>stav<th></tr>
-<tr><td>ollama<td>lokální Ollama<td>ollama<td>{{ upstream }}<td>—<td><code>{{ root }}</code><td>—<td class="ok">vestavěné<td></tr>
+<tr><th>id<th>název<th>typ<th>upstream<th>klíč<th>base_url pro aplikace<th>modely<th>ceník<th>stav<th></tr>
+<tr><td>ollama<td>lokální Ollama<td>ollama<td>{{ upstream }}<td>—<td><code>{{ root }}</code><td>—<td>—<td class="ok">vestavěné<td></tr>
 {% for p in rows %}
 <tr>
   <td>{{ p.slug }}
@@ -16,6 +16,7 @@
   <td>{{ p.base_url }}
   <td>{{ p.masked or '—' }}
   <td><code>{{ p.client_base_url }}</code>
+  <td>{{ p.models or '—' }}
   <td>{{ 'ano' if p.pricing_json and p.pricing_json != '{}' else '—' }}
   <td class="{{ 'ok' if p.enabled else 'mute' }}">{{ 'zapnuto' if p.enabled else 'vypnuto' }}
   <td class="wrap" style="white-space:nowrap">
@@ -42,6 +43,9 @@
   <div class="field"><label for="base_url">Adresa upstreamu (bez /v1)</label>
     <input type="text" id="base_url" name="base_url" value="{{ edit.base_url if edit else '' }}" placeholder="https://api.openai.com">
     <div class="help">Výchozí: {% for k, v in defaults.items() %}{{ k }} = {{ v }}{{ ' · ' if not loop.last }}{% endfor %}. OpenRouter: https://openrouter.ai/api · Groq: https://api.groq.com/openai</div></div>
+  <div class="field"><label for="models">Modely služby (jen typ gpu; názvy nebo vzory, oddělené čárkou)</label>
+    <input type="text" id="models" name="models" value="{{ edit.models if edit else '' }}" placeholder="tts-cs, whisper-*">
+    <div class="help">Dotaz na takový model (<code>POST {{ root }}/v1/audio/speech</code> s <code>"model": "tts-cs"</code>) proxy pošle sem místo do Ollamy. Před přepnutím karty se Ollamě řekne, ať uvolní VRAM, a naopak. Služba musí umět <code>GET /api/ps</code>, <code>POST /api/unload</code> a <code>GET /v1/models</code> — viz <a href="https://github.com/hulek-ales/OllamaProxy/blob/main/docs/GPU-BACKEND.md">docs/GPU-BACKEND.md</a>.</div></div>
   <div class="field"><label for="api_key">API klíč poskytovatele</label>
     <input type="password" id="api_key" name="api_key" autocomplete="off" placeholder="{{ ('uloženo (' + edit.masked + ') — nech prázdné, když ho neměníš') if edit and edit.masked else 'sk-…' }}">
     {% if edit and edit.masked %}<label style="display:inline"><input type="checkbox" name="clear_key" value="1"> smazat uložený klíč</label>{% endif %}</div>

@@ -33,8 +33,13 @@ Open WebUI / aplikace ──► ollama-proxy :11435 ──► open-webui:11434 (
   `POST /mgmt/v1/models/load` a dostane `loaded: true/false`.
 - **Fronta úloh pro agenty**: `POST /mgmt/v1/jobs` vrátí id, proxy dotaz vyřídí,
   až se to hodí (interaktivní provoz má přednost, úlohy se seskupují podle
-  modelu), výsledek `GET /mgmt/v1/jobs/{id}` nebo callback. Limity na klíč:
+  modelu), výsledek `GET /mgmt/v1/jobs/{id}` nebo callback; binární výsledek
+  (audio) jako soubor `GET /mgmt/v1/jobs/{id}/result`. Limity na klíč:
   počet čekajících úloh a dotazů za minutu (429).
+- **GPU služby vedle Ollamy** (TTS, Whisper…): poskytovatel typu `gpu` se
+  seznamem modelů. Dotaz s `"model": "tts-cs"` proxy pošle do jejího kontejneru
+  místo do Ollamy, **stejný plánovač** ho řadí za chat a naopak, a před přepnutím
+  řekne starému backendu, ať uvolní VRAM. Kontrakt služby: **[docs/GPU-BACKEND.md](docs/GPU-BACKEND.md)**.
 - **Self-update z Gitu**: restart kontejneru = `git pull` (viz DEPLOY-TRUENAS.md).
 - Retence logu, změna hesla, vše v GUI nebo přes API.
 
@@ -171,11 +176,17 @@ curl -H "$H" -X DELETE http://server:11435/mgmt/v1/jobs/42
 ```
 
 - `path` je cesta, kam by šel průchozí dotaz (`/api/chat`, `/api/generate`,
-  `/api/embed`, `/v1/chat/completions`, `/v1/embeddings`, `/v1/messages`, …),
-  `body` tělo v jeho formátu. `provider` = `ollama` (výchozí) nebo slug
-  poskytovatele; komerční úlohy GPU nepotřebují a jedou hned.
+  `/api/embed`, `/v1/chat/completions`, `/v1/embeddings`, `/v1/messages`,
+  `/v1/audio/speech`, …), `body` tělo v jeho formátu. `provider` = `ollama`
+  (výchozí) nebo slug poskytovatele; model GPU služby se pozná sám. Komerční
+  úlohy GPU nepotřebují a jedou hned, úlohy pro GPU služby jdou přes plánovač
+  jako Ollama.
 - Úloha se pošle vždy bez streamu, `result` je celá JSON odpověď. Zapíše se i
   do běžného logu (tokeny, cena, Spotřeba), v detailu záznamu je odkaz.
+  Binární odpověď (audio z TTS) se uloží jako soubor do `OLLAMA_JOBS_DIR`
+  (výchozí `/data/jobs`), `result` je jen `{file, content_type, bytes}` a
+  obsah dá `GET /mgmt/v1/jobs/{id}/result` (`result_url`). Soubor se maže
+  spolu s úlohou po `jobs_retention_days`.
 - `callback_url`: po dokončení proxy pošle POST se stejným JSON jako `GET /jobs/{id}`.
 - `not_before`: dřív se nespustí (noční dávka poslaná večer).
 - Klíč `client` vidí jen svoje úlohy. Úlohy přežijí restart (běžící se vrátí do
@@ -247,10 +258,40 @@ Typy poskytovatelů a co dělají:
 | `anthropic` | `x-api-key` + `anthropic-version` | `https://api.anthropic.com` | `…/providers/<slug>` |
 | `google` | `x-goog-api-key` | `https://generativelanguage.googleapis.com` | `…/providers/<slug>` |
 | `ollama` | `Authorization: Bearer` (nepovinné) | `http://jiny-server:11434` | `…/providers/<slug>` |
+| `gpu` | `Authorization: Bearer` (nepovinné) | `http://tts:8000` (kontejner vedle Ollamy) | `…/v1` — směruje se podle modelu, jde přes plánovač |
 
 U typu `openai` proxy do streamovaných dotazů doplní
 `stream_options.include_usage`, jinak OpenAI tokeny ve streamu neposílá
 (vypnutelné u poskytovatele, kdyby to nějaké API odmítalo).
+
+### GPU služby vedle Ollamy (TTS, Whisper) — sdílení karty
+
+Na 12 GB se jazykový model a syntéza řeči nevejdou najednou, a Ollama o cizím
+procesu na kartě neví. Proxy proto bere GPU službu jako **další backend pod
+stejným plánovačem**:
+
+1. GUI → Poskytovatelé → typ **Lokální GPU služba**, adresa `http://tts:8000`,
+   modely `tts-cs` (názvy nebo vzory). Podle modelů se směruje.
+2. Agent pošle `POST http://server:11435/v1/audio/speech` s `"model": "tts-cs"`
+   — na stejnou adresu jako Ollamu. Proxy pozná model služby, **zařadí dotaz
+   za běžící chat**, Ollamě řekne `keep_alive: 0`, počká, až je `/api/ps`
+   prázdné, a teprve pak dotaz pošle do kontejneru. Další chat zase počká na
+   syntézu, proxy službě pošle `POST /api/unload` a pustí Ollamu.
+3. Kdo čekat nechce, pošle `X-Opx-Wait: 0` (503). Dlouhou syntézu pošli jako
+   úlohu (`/mgmt/v1/jobs`, cesta `/v1/audio/speech`) — výsledek je soubor.
+
+Služba musí umět `GET /v1/models`, `GET /api/ps`, `POST /api/unload` (a
+volitelně `/api/load`); po startu nemá nic v paměti a model nahraje první
+dotaz. Přesný kontrakt, chování při chybách a rady k syntéze: **[docs/GPU-BACKEND.md](docs/GPU-BACKEND.md)**.
+Stav přepínání je v GUI → Nastavení → Stav plánovače a v `GET /mgmt/v1/models/status`
+(`backend`, `evicting`, `backends`, `last_evict_error`). Když služba VRAM neuvolní
+do `gpu_evict_timeout_s`, proxy přepne i tak, ať mrtvý kontejner nezastaví Ollamu.
+Modely služby nejsou v `/api/tags` (Open WebUI by je nabídlo jako chat), v
+`/mgmt/v1/models` ano; klíč agenta je musí mít v `allowed_models`.
+
+V logu má dotaz `provider = <slug>`; u `/audio/speech` je v `prompt_tokens`
+**počet znaků vstupu**, takže ceník „USD za 1M znaků“ u komerčního TTS
+(`/providers/openai/v1/audio/speech`) dá správnou cenu.
 
 ### JSON API pro ladění (`/mgmt/v1`)
 
@@ -278,13 +319,14 @@ curl -H "$H" -X PUT  'http://server:11435/mgmt/v1/settings' -d '{"retention_days
 |---|---|---|
 | `OLLAMA_UPSTREAM` | `http://open-webui:11434` | kam jde holé Ollama API |
 | `OLLAMA_LOG_DB` | `/data/ollama_log.db` | SQLite |
+| `OLLAMA_JOBS_DIR` | `/data/jobs` (vedle DB) | soubory s binárními výsledky úloh (audio) |
 | `OLLAMA_LOG_BODIES` | `1` | výchozí pro „ukládat texty“ (dál se řídí v GUI) |
 | `PROXY_PORT` | `11435` | port uvicornu |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / *(prázdné = `admin123`)* | počáteční účet, jen do prázdné DB |
 | `UPDATE_ON_START` / `REPO_URL` / `REPO_BRANCH` | `true` / toto repo / `main` | self-update při startu |
 
 Vše ostatní (poskytovatelé, klíče, retence, vyžadování klíče pro Ollamu,
-plánovač modelů) je v DB a nastavuje se v GUI nebo přes `/mgmt/v1`.
+plánovač modelů, GPU služby) je v DB a nastavuje se v GUI nebo přes `/mgmt/v1`.
 
 ## Databáze
 
@@ -302,8 +344,9 @@ provider, key_name, client_ip, cost_usd, error, client_user, queue_ms, job_id
 ```
 
 Dále `users`, `api_keys` (jen hash klíče), `providers` (klíč poskytovatele
-v plaintextu — DB je ve volume, chraň ho), `settings`, `jobs` (fronta úloh
-včetně výsledků).
+v plaintextu — DB je ve volume, chraň ho; u typu `gpu` sloupec `models`),
+`settings`, `jobs` (fronta úloh včetně výsledků; binární výsledek má
+`result_path` a leží v `OLLAMA_JOBS_DIR`).
 
 ## Vývoj
 
@@ -314,8 +357,9 @@ OLLAMA_UPSTREAM=http://localhost:11434 OLLAMA_LOG_DB=./dev.db ADMIN_PASSWORD=dev
   uvicorn ollamaproxy.main:app --reload --port 11435
 ```
 
-Struktura: `ollamaproxy/proxy.py` (přeposílání a log), `collector.py` (čtení
-tokenů ze streamů), `providers.py` (hlavičky, modely, ceník), `scheduler.py`
-(plánovač modelů), `jobs.py` (fronta úloh, limit dotazů), `mgmt.py` (JSON API),
+Struktura: `ollamaproxy/proxy.py` (přeposílání a log, směrování podle modelu),
+`collector.py` (čtení tokenů ze streamů), `providers.py` (hlavičky, modely,
+ceník, kontrakt GPU služby), `scheduler.py` (plánovač modelů a backendů na
+jedné kartě), `jobs.py` (fronta úloh, limit dotazů), `mgmt.py` (JSON API),
 `ui.py` + `templates/` (GUI), `db.py`, `auth.py` (klíče, vzory modelů),
 `telemetry.py`, `clients/opx_client.py` (klient pro agenty).

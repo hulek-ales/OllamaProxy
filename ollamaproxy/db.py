@@ -14,6 +14,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from . import config
+from .auth import model_allowed
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -124,6 +125,16 @@ EXTRA_KEY_COLUMNS = [
     ("rate_per_min", "INTEGER DEFAULT 0"),   # dotazů za minutu; 0 = výchozí z nastavení
 ]
 
+# sloupce tabulky providers přidané později
+EXTRA_PROVIDER_COLUMNS = [
+    ("models", "TEXT DEFAULT ''"),   # typ gpu: vzory modelů, které služba obsluhuje (směrování podle modelu)
+]
+
+# sloupce tabulky jobs přidané později
+EXTRA_JOB_COLUMNS = [
+    ("result_path", "TEXT"),         # binární výsledek (audio…) leží v souboru, ne v result_json
+]
+
 LIGHT_COLS = (
     "id, ts, endpoint, model, status, prompt_tokens, completion_tokens, "
     "total_duration_ms, eval_duration_ms, tokens_per_sec, wall_time_ms, "
@@ -134,7 +145,7 @@ LIGHT_COLS = (
 JOB_LIGHT_COLS = (
     "id, batch_id, key_id, key_name, status, priority, provider, path, model, callback_url,"
     " not_before, created_at, started_at, finished_at, attempts, status_code, error, request_id,"
-    " callback_status"
+    " callback_status, result_path"
 )
 
 SETTING_DEFAULTS = {
@@ -151,9 +162,11 @@ SETTING_DEFAULTS = {
     "jobs_max_queued": "200",       # výchozí strop čekajících úloh na klíč
     "jobs_retention_days": "7",     # hotové úlohy mazat po tolika dnech (0 = nemazat)
     "rate_limit_per_min": "0",      # výchozí limit dotazů za minutu na klíč (0 = bez limitu)
+    "gpu_evict_timeout_s": "60",    # jak dlouho čekat, než backend (Ollama / GPU služba) uvolní VRAM
+    "gpu_request_timeout_s": "900", # dotaz na GPU službu: nejdelší ticho na lince, pak se považuje za mrtvý
 }
 
-PROVIDER_KINDS = ("openai", "anthropic", "google", "ollama")
+PROVIDER_KINDS = ("openai", "anthropic", "google", "ollama", "gpu")
 
 _SINCE_RE = re.compile(r"^(\d+)([mhd])$")
 
@@ -217,7 +230,8 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.conn.execute("PRAGMA journal_mode=WAL")
-        for table, columns in (("requests", EXTRA_COLUMNS), ("api_keys", EXTRA_KEY_COLUMNS)):
+        for table, columns in (("requests", EXTRA_COLUMNS), ("api_keys", EXTRA_KEY_COLUMNS),
+                               ("providers", EXTRA_PROVIDER_COLUMNS), ("jobs", EXTRA_JOB_COLUMNS)):
             for col, typ in columns:
                 try:
                     self.conn.execute("ALTER TABLE " + table + " ADD COLUMN " + col + " " + typ)
@@ -442,12 +456,12 @@ class Database:
             return cur.rowcount > 0
 
     def finish_job(self, job_id: int, status: str, status_code=None, result_json=None, error=None,
-                   request_id=None):
+                   request_id=None, result_path=None):
         with self.lock:
             self.conn.execute(
                 "UPDATE jobs SET status = ?, finished_at = ?, status_code = ?, result_json = ?,"
-                " error = ?, request_id = ? WHERE id = ?",
-                (status, now_iso(), status_code, result_json, error, request_id, job_id))
+                " error = ?, request_id = ?, result_path = ? WHERE id = ?",
+                (status, now_iso(), status_code, result_json, error, request_id, result_path, job_id))
             self.conn.commit()
 
     def requeue_job(self, job_id: int, error=None):
@@ -498,11 +512,17 @@ class Database:
         if not days or days <= 0:
             return 0
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+        where = " WHERE status IN ('done','error','cancelled') AND finished_at < ?"
         with self.lock:
-            cur = self.conn.execute(
-                "DELETE FROM jobs WHERE status IN ('done','error','cancelled') AND finished_at < ?",
-                (cutoff,))
+            files = [r[0] for r in self.conn.execute(
+                "SELECT result_path FROM jobs" + where + " AND result_path IS NOT NULL", (cutoff,))]
+            cur = self.conn.execute("DELETE FROM jobs" + where, (cutoff,))
             self.conn.commit()
+        for path in files:   # soubor s výsledkem odchází spolu se záznamem
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         return cur.rowcount
 
     def get_key_by_hash(self, key_hash: str):
@@ -532,27 +552,44 @@ class Database:
             r = self.conn.execute("SELECT * FROM providers WHERE slug = ?", (slug,)).fetchone()
         return dict(r) if r else None
 
+    def gpu_providers(self) -> list:
+        """Zapnuté lokální GPU služby (typ gpu) — sdílejí kartu s Ollamou, jdou přes plánovač."""
+        with self.lock:
+            return _rows(self.conn.execute(
+                "SELECT * FROM providers WHERE kind = 'gpu' AND enabled = 1 ORDER BY slug"))
+
+    def provider_for_model(self, model: str):
+        """Slug GPU služby, která model obsluhuje (podle jejích vzorů), jinak None = Ollama."""
+        if not model:
+            return None
+        for prov in self.gpu_providers():
+            patterns = [p for p in (prov.get("models") or "").split(",") if p]
+            if patterns and model_allowed(patterns, model):
+                return prov["slug"]
+        return None
+
     def save_provider(self, slug, name, kind, base_url, api_key=None, pricing=None,
-                      inject_usage=True, enabled=True):
+                      inject_usage=True, enabled=True, models=()):
         """Založí nebo upraví poskytovatele. api_key=None znamená „klíč neměnit“."""
         if kind not in PROVIDER_KINDS:
             raise ValueError("neznámý typ poskytovatele: " + str(kind))
         pricing_json = json.dumps(pricing or {})
+        models_csv = ",".join(models or ())
         with self.lock:
             existing = self.conn.execute("SELECT id, api_key FROM providers WHERE slug = ?", (slug,)).fetchone()
             if existing:
                 key = existing["api_key"] if api_key is None else api_key
                 self.conn.execute(
                     "UPDATE providers SET name=?, kind=?, base_url=?, api_key=?, pricing_json=?,"
-                    " inject_usage=?, enabled=? WHERE slug=?",
+                    " inject_usage=?, enabled=?, models=? WHERE slug=?",
                     (name, kind, base_url, key, pricing_json, 1 if inject_usage else 0,
-                     1 if enabled else 0, slug))
+                     1 if enabled else 0, models_csv, slug))
             else:
                 self.conn.execute(
                     "INSERT INTO providers (slug, name, kind, base_url, api_key, pricing_json,"
-                    " inject_usage, enabled, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    " inject_usage, enabled, models, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (slug, name, kind, base_url, api_key or "", pricing_json,
-                     1 if inject_usage else 0, 1 if enabled else 0, now_iso()))
+                     1 if inject_usage else 0, 1 if enabled else 0, models_csv, now_iso()))
             self.conn.commit()
 
     def delete_provider(self, slug: str) -> bool:

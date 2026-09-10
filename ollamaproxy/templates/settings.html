@@ -24,6 +24,11 @@
   <div class="field"><label for="sched_max_wait_s">Nejdelší čekání ve frontě (s)</label>
     <input type="number" id="sched_max_wait_s" name="sched_max_wait_s" min="0" step="1" value="{{ settings.sched_max_wait_s }}">
     <div class="help">Čeká-li někdo déle, nové dotazy na aktuální model se zařadí do fronty, aby GPU uvolnily.</div></div>
+  <div class="field" style="display:flex;gap:16px;flex-wrap:wrap">
+    <label>Uvolnění VRAM při přepnutí backendu: čekat nejdéle (s) <input type="number" name="gpu_evict_timeout_s" min="0" value="{{ settings.gpu_evict_timeout_s }}" style="width:90px"></label>
+    <label>Dotaz na GPU službu: nejdelší ticho na lince (s; 0 = bez limitu) <input type="number" name="gpu_request_timeout_s" min="0" value="{{ settings.gpu_request_timeout_s }}" style="width:90px"></label>
+  </div>
+  <div class="help" style="margin:-6px 0 12px">GPU služby (Poskytovatelé, typ gpu) sdílejí kartu s Ollamou. Před přepnutím na model jiného backendu proxy tomu starému řekne, ať uvolní VRAM, a počká, až je prázdná. Když neodpoví do limitu, přepne se i tak (chyba je ve stavu níž) — mrtvá služba nesmí zastavit Ollamu.</div>
 
   <h2>Fronta úloh (agenti)</h2>
   <div class="field"><label><input type="checkbox" name="jobs_enabled" value="1" {{ 'checked' if settings.jobs_enabled == '1' }}> zpracovávat odložené úlohy (<code>POST /mgmt/v1/jobs</code>)</label>
@@ -49,8 +54,9 @@
 <div class="panel">
 <h2 style="margin-top:0">Stav plánovače</h2>
 <div class="kv">
-  <div>v paměti Ollamy</div><div>{{ sched.loaded | join(', ') or '—' }}</div>
-  <div>GPU drží</div><div>{{ sched.admitted or '—' }}{% if sched.draining %} <span class="mute">(uvolňuje pro čekající)</span>{% endif %}</div>
+  <div>v paměti (Ollama + GPU služby)</div><div>{{ sched.loaded | join(', ') or '—' }}</div>
+  <div>GPU drží</div><div>{{ sched.admitted or '—' }}{% if sched.backend and sched.backend != 'ollama' %} <span class="mute">({{ sched.backend }})</span>{% endif %}{% if sched.draining %} <span class="mute">(uvolňuje pro čekající)</span>{% endif %}{% if sched.evicting %} <span class="warn" style="color:var(--warn)">→ přepíná na {{ sched.evicting }}, čeká na uvolnění VRAM</span>{% endif %}</div>
+  {% if gpu_backends %}<div>GPU služby</div><div>{{ gpu_backends | join(', ') }} · přepnutí backendu {{ sched.evictions }}{% if sched.last_evict_error %} · <span class="err">poslední uvolnění selhalo: {{ sched.last_evict_error }}</span>{% endif %}</div>{% endif %}
   <div>běží</div><div>{% for m, n in sched.in_flight.items() %}{{ m }} × {{ n }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}</div>
   <div>čeká</div><div>{% for m, n in sched.waiting.items() %}{{ m }} × {{ n }}{{ ', ' if not loop.last }}{% else %}—{% endfor %}{% if sched.oldest_wait_s %} <span class="mute">(nejdéle {{ sched.oldest_wait_s }} s)</span>{% endif %}</div>
   <div>přepnutí modelu</div><div>{{ sched.switches }}</div>

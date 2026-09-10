@@ -7,18 +7,21 @@ nastavení jen klíč s rolí admin (nebo session).
 
 import asyncio
 import json
+import os
 import secrets
 import time
 from typing import Optional, Union
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from . import config
 from .auth import hash_key, new_api_key, parse_model_patterns, principal_from_request
 from .db import PROVIDER_KINDS, SETTING_DEFAULTS, db, parse_since
 from .jobs import ALLOWED_JOB_PATHS, job_view, key_limit, limiter, worker
-from .providers import client_base_url, fetch_models, mask_key, parse_pricing
+from .providers import (backend_load, backend_ps, client_base_url, fetch_models, mask_key,
+                        parse_pricing, provider_models)
 from .scheduler import sched
 from .telemetry import active, gpu_snapshot, host_snapshot
 
@@ -52,6 +55,7 @@ def provider_view(row: dict, request: Request) -> dict:
         "pricing": parse_pricing(row["pricing_json"]) if row["pricing_json"] else {},
         "inject_usage": bool(row["inject_usage"]),
         "enabled": bool(row["enabled"]),
+        "models": provider_models(row),
         "created_at": row["created_at"],
         "client_base_url": client_base_url(proxy_root(request), row["slug"], row["kind"]),
     }
@@ -150,9 +154,17 @@ _loading = {}      # model → task, který ho v Ollamě nahrává (drží míst
 _interest = {}     # model → (first_ts, last_poll_ts): pořadí ve frontě přes opakované dotazy
 
 
-async def _load_in_ollama(client, model: str, keep_alive):
-    """Prázdný /api/generate = Ollama model jen nahraje. Místo v plánovači se vrátí po doběhnutí."""
+async def _load_model(client, model: str, keep_alive):
+    """Nahraje model do jeho backendu. Ollama: prázdný /api/generate. GPU služba: POST /api/load
+    (nepovinné — bez něj model nahraje první dotaz). Místo v plánovači se vrátí po doběhnutí."""
     try:
+        slug = sched.backend_of(model)
+        if slug != "ollama":
+            prov = db.get_provider(slug)
+            if prov is None:
+                return "provider '" + slug + "' is not configured"
+            await backend_load(client, prov["base_url"], prov["api_key"], model)
+            return None
         body = {"model": model, "prompt": "", "stream": False}
         if keep_alive is not None:
             body["keep_alive"] = keep_alive
@@ -175,12 +187,26 @@ def _load_view(model: str, loaded: bool, status: str, error=None) -> dict:
 
 @router.get("/models/status")
 async def models_status(request: Request):
-    """Co Ollama drží v paměti a co dělá plánovač (fronta po modelech, kdo má GPU)."""
+    """Co je v paměti (Ollama i GPU služby) a co dělá plánovač: fronta po modelech, kdo drží
+    kartu (`admitted` + `backend`), `evicting` = přepíná se a starý backend uvolňuje VRAM."""
     require(request)
     snap = sched.snapshot()
     snap["loaded"] = sorted(await sched.loaded(force=True))
+    snap["backends"] = await backends_status(request.app.state.client)
     snap["jobs"] = worker.snapshot()
     return snap
+
+
+async def backends_status(client) -> dict:
+    """GPU služby: co drží v paměti a jestli odpovídají."""
+    out = {}
+    for prov in db.gpu_providers():
+        try:
+            out[prov["slug"]] = {"ok": True, "loaded": await backend_ps(client, prov["base_url"], prov["api_key"]),
+                                 "models": provider_models(prov)}
+        except Exception as exc:
+            out[prov["slug"]] = {"ok": False, "error": str(exc), "loaded": [], "models": provider_models(prov)}
+    return out
 
 
 @router.post("/models/load")
@@ -214,7 +240,7 @@ async def models_load(body: LoadIn, request: Request):
             return _load_view(model, True, "ready")
         else:
             task = asyncio.get_running_loop().create_task(
-                _load_in_ollama(request.app.state.client, model, body.keep_alive))
+                _load_model(request.app.state.client, model, body.keep_alive))
             _loading[model] = task
 
     remaining = max(0.0, deadline - time.monotonic())
@@ -250,13 +276,17 @@ def _check_job(p, j: JobIn):
     if path not in ALLOWED_JOB_PATHS:
         raise HTTPException(422, "path must be one of " + ", ".join(ALLOWED_JOB_PATHS))
     provider = (j.provider or "ollama").strip()
+    model = j.body.get("model") if isinstance(j.body.get("model"), str) else None
+    if provider == "ollama" and model:
+        provider = db.provider_for_model(model) or "ollama"   # model GPU služby → její kontejner
     if provider != "ollama":
         prov = db.get_provider(provider)
         if prov is None or not prov["enabled"]:
             raise HTTPException(404, "provider '" + provider + "' is not configured")
         if not p.may_use(provider):
             raise HTTPException(403, "this key may not use provider '" + provider + "'")
-    model = j.body.get("model") if isinstance(j.body.get("model"), str) else None
+        if prov["kind"] == "gpu" and not model:
+            raise HTTPException(422, "body.model is required")
     if provider == "ollama" and not model:
         raise HTTPException(422, "body.model is required")
     if model and not p.may_model(model):
@@ -341,6 +371,23 @@ async def get_job(jid: int, request: Request):
     return job_view(job, with_bodies=True)
 
 
+@router.get("/jobs/{jid}/result")
+async def job_result(jid: int, request: Request):
+    """Binární výsledek úlohy (audio z TTS…) — soubor, ne JSON. Jen u hotové úlohy s `result_url`."""
+    p = require(request)
+    job = db.get_job(jid)
+    if job is None or (not p.is_admin and job["key_id"] != p.key_id):
+        raise HTTPException(404, "no such job")
+    path = job.get("result_path")
+    if not path or not os.path.isfile(path):
+        raise HTTPException(404, "job has no file result")
+    try:
+        media = json.loads(job.get("result_json") or "{}").get("content_type") or "application/octet-stream"
+    except Exception:
+        media = "application/octet-stream"
+    return FileResponse(path, media_type=media, filename=os.path.basename(path))
+
+
 @router.delete("/jobs/{jid}")
 async def cancel_job(jid: int, request: Request):
     """Zruší čekající úlohu; běžící se přeruší (vrátí se `status: running`, dokončí ji pracovník)."""
@@ -367,6 +414,14 @@ class ProviderIn(BaseModel):
     pricing: dict = Field(default_factory=dict)
     inject_usage: bool = True
     enabled: bool = True
+    models: list = Field(default_factory=list)   # typ gpu: vzory modelů služby (směrování podle modelu)
+
+
+def _provider_models(body: ProviderIn) -> list:
+    models_ = parse_model_patterns(body.models)
+    if body.kind == "gpu" and not models_:
+        raise HTTPException(422, "gpu provider needs `models` (names or globs it serves, e.g. tts-cs)")
+    return models_ if body.kind == "gpu" else []
 
 
 @router.get("/providers")
@@ -388,7 +443,7 @@ async def create_provider(body: ProviderIn, request: Request):
         raise HTTPException(422, "pricing: " + str(exc))
     db.save_provider(body.slug, body.name or body.slug, body.kind, body.base_url,
                      api_key=body.api_key or "", pricing=pricing,
-                     inject_usage=body.inject_usage, enabled=body.enabled)
+                     inject_usage=body.inject_usage, enabled=body.enabled, models=_provider_models(body))
     return provider_view(db.get_provider(body.slug), request)
 
 
@@ -415,7 +470,8 @@ async def update_provider(slug: str, body: ProviderIn, request: Request):
     except Exception as exc:
         raise HTTPException(422, "pricing: " + str(exc))
     db.save_provider(slug, body.name or slug, body.kind, body.base_url, api_key=body.api_key,
-                     pricing=pricing, inject_usage=body.inject_usage, enabled=body.enabled)
+                     pricing=pricing, inject_usage=body.inject_usage, enabled=body.enabled,
+                     models=_provider_models(body))
     return provider_view(db.get_provider(slug), request)
 
 
@@ -529,6 +585,8 @@ class SettingsIn(BaseModel):
     jobs_max_queued: Optional[int] = Field(default=None, ge=0)
     jobs_retention_days: Optional[int] = Field(default=None, ge=0)
     rate_limit_per_min: Optional[int] = Field(default=None, ge=0)
+    gpu_evict_timeout_s: Optional[float] = Field(default=None, ge=0, le=3600)
+    gpu_request_timeout_s: Optional[float] = Field(default=None, ge=0, le=86400)
 
 
 @router.get("/settings")
@@ -555,7 +613,8 @@ async def put_settings(body: SettingsIn, request: Request):
     if body.jobs_enabled is not None:
         db.set_setting("jobs_enabled", "1" if body.jobs_enabled else "0")
     for key in ("jobs_max_wait_s", "jobs_idle_s", "jobs_preempt_s", "jobs_max_queued",
-                "jobs_retention_days", "rate_limit_per_min"):
+                "jobs_retention_days", "rate_limit_per_min", "gpu_evict_timeout_s",
+                "gpu_request_timeout_s"):
         val = getattr(body, key)
         if val is not None:
             db.set_setting(key, val)
