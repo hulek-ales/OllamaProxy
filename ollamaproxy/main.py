@@ -11,7 +11,7 @@ from . import config, mgmt, proxy, ui
 from .auth import hash_password
 from .db import db
 from .jobs import worker
-from .providers import backend_ps, backend_unload
+from .providers import backend_ps, backend_unload, provider_models
 from .scheduler import sched
 from .telemetry import ps_models
 
@@ -28,7 +28,7 @@ async def all_loaded(client: httpx.AsyncClient) -> list:
     names = list(await ps_models(client, config.UPSTREAM))
     for prov in db.gpu_providers():
         try:
-            names.extend(await backend_ps(client, prov["base_url"], prov["api_key"]))
+            names.extend(await backend_ps(client, prov["base_url"], prov["api_key"], provider_models(prov)))
         except Exception:
             pass
     return names
@@ -56,7 +56,7 @@ async def evict_backend(client: httpx.AsyncClient, slug: str):
     if prov is None or prov["kind"] != "gpu":
         return
     await backend_unload(client, prov["base_url"], prov["api_key"])
-    await _wait_empty(lambda: backend_ps(client, prov["base_url"], prov["api_key"]))
+    await _wait_empty(lambda: backend_ps(client, prov["base_url"], prov["api_key"], provider_models(prov)))
 
 
 def ensure_admin():

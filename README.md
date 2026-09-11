@@ -282,7 +282,10 @@ stejným plánovačem**:
 
 Služba musí umět `GET /v1/models`, `GET /api/ps`, `POST /api/unload` (a
 volitelně `/api/load`); po startu nemá nic v paměti a model nahraje první
-dotaz. Přesný kontrakt, chování při chybách a rady k syntéze: **[docs/GPU-BACKEND.md](docs/GPU-BACKEND.md)**.
+dotaz. Hotový [Chatterbox-TTS-Server](https://github.com/devnen/Chatterbox-TTS-Server)
+(web UI, klonování hlasu) projde bez úprav — místo `/api/ps` má `/api/model-info`
+a modely se berou z konfigurace, proxy to zná. Přesný kontrakt, chování při
+chybách a rady k syntéze: **[docs/GPU-BACKEND.md](docs/GPU-BACKEND.md)**.
 Stav přepínání je v GUI → Nastavení → Stav plánovače a v `GET /mgmt/v1/models/status`
 (`backend`, `evicting`, `backends`, `last_evict_error`). Když služba VRAM neuvolní
 do `gpu_evict_timeout_s`, proxy přepne i tak, ať mrtvý kontejner nezastaví Ollamu.

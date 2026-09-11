@@ -56,6 +56,31 @@ ji zaloguje a řadí, pokud je v těle `model`. Pro frontu úloh je zatím povol
 - **Klíč** (nepovinný): když u poskytovatele vyplníš API klíč, proxy ho posílá jako
   `Authorization: Bearer …`. Klienti mají vždy jen proxy klíč `opx_…`.
 
+## Hotový server: Chatterbox-TTS-Server
+
+[devnen/Chatterbox-TTS-Server](https://github.com/devnen/Chatterbox-TTS-Server) (web UI,
+Docker s NVIDIA, port 8004, dělení dlouhého textu a slepení uvnitř, klonování hlasu)
+se s proxy domluví **bez úprav**. Má jeden model a část kontraktu jinak, proxy to zná:
+
+| kontrakt | Chatterbox-TTS-Server | co proxy dělá |
+|---|---|---|
+| `GET /api/ps` | nemá → `GET /api/model-info` `{"loaded": true/false, "type": "multilingual", …}` | `loaded` = všechny modely služby z konfigurace jsou v paměti |
+| `GET /v1/models` | nemá (jen `/v1/audio/voices`) | seznam modelů = ten z poskytovatele („Otestovat“ ho vrátí) |
+| `POST /api/unload` | má, vrací `{"status": "unloaded"}` | stejné |
+| `POST /api/load` | nemá | model nahraje první dotaz; `/mgmt/v1/models/load` vrátí `ready` |
+| `POST /v1/audio/speech` | `model, input, voice, response_format (wav\|opus\|mp3), speed, seed, language` | přeposílá |
+
+Registrace: typ gpu, adresa `http://chatterbox:8004`, modely třeba `tts-cs` (název je jen
+tvůj štítek pro směrování; server pole `model` nečte). V dotazu posílej `"language": "cs"`,
+`"voice": "<soubor v predefined_voices nebo reference_audio>"`, `"response_format": "mp3"`.
+
+Pozor na češtinu: multilingual model má 23 jazyků a čeština mezi nimi není; české
+váhy ([Thomcles/Chatterbox-TTS-Czech](https://huggingface.co/Thomcles/Chatterbox-TTS-Czech))
+se nahrávají do multilingual modelu a server umí v `config.yaml` jen předdefinované
+`model.repo_id` (`original` / `turbo` / `multilingual`) — načtení vlastních vah je
+pár řádků v jeho `engine.py`. Uvolnění po nečinnosti server nemá; nevadí, o `/api/unload`
+si proxy říká sama při přepnutí.
+
 Samotná služba (kontejner s motorem) i podcastový agent žijí ve vlastním repu;
 tady je jen rozhraní, které proxy vyžaduje. Rada na začátek: nejdřív motor, který
 vrací ticho ve WAV, ať se cesta agent → proxy → služba → soubor odzkouší dřív,

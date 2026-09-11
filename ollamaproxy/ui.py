@@ -15,7 +15,7 @@ from .auth import (SESSION_COOKIE, csrf_token, hash_password, make_session, new_
 from .db import PROVIDER_KINDS, db
 from .jobs import job_view, worker
 from .providers import (DEFAULT_BASE_URL, KIND_LABELS, client_base_url, fetch_models,
-                        mask_key, parse_pricing)
+                        mask_key, parse_pricing, provider_models)
 from .scheduler import sched
 
 router = APIRouter(prefix="/ui", tags=["ui"], include_in_schema=False)
@@ -332,7 +332,8 @@ async def providers_test(slug: str, request: Request):
     if row is None:
         return back("/ui/providers", err="Poskytovatel neexistuje.")
     try:
-        models = await fetch_models(request.app.state.client, row["kind"], row["base_url"], row["api_key"])
+        models = await fetch_models(request.app.state.client, row["kind"], row["base_url"], row["api_key"],
+                                    fallback=provider_models(row))
     except Exception as exc:
         return back("/ui/providers", err=slug + ": " + str(exc))
     sample = ", ".join(models[:8]) + (" …" if len(models) > 8 else "")

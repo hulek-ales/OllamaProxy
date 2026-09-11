@@ -206,6 +206,41 @@ def test_dead_backend_does_not_block_ollama(admin, tts, upstream):
         admin.delete("/mgmt/v1/providers/deadtts")
 
 
+def test_chatterbox_server_without_ps_and_models(admin, tts, upstream):
+    """Chatterbox-TTS-Server: stav z /api/model-info, modely z konfigurace, /api/unload."""
+    r = admin.post("/mgmt/v1/providers", json={"slug": "cbx", "kind": "gpu", "base_url": "http://chatterbox.test",
+                                               "models": ["cbx-cs"]})
+    assert r.status_code == 201, r.text
+    try:
+        assert admin.post("/mgmt/v1/providers/cbx/test").json() == {"ok": True, "models": ["cbx-cs"]}
+        assert admin.get("/mgmt/v1/models").json()["cbx"]["models"] == ["cbx-cs"]
+        st = admin.get("/mgmt/v1/models/status").json()["backends"]["cbx"]
+        assert st["ok"] is True and st["loaded"] == []
+
+        chat = {"model": "gemma4:12b", "messages": [{"role": "user", "content": "ahoj"}], "stream": False}
+        assert admin.post("/api/chat", json=chat).status_code == 200
+        r = admin.post("/v1/audio/speech", json={"model": "cbx-cs", "input": "Dobrý den", "language": "cs",
+                                                 "voice": "jirka.wav", "response_format": "wav"})
+        assert r.status_code == 200 and r.headers["content-type"].startswith("audio/wav")
+        assert upstream.loaded == set() and sched.admitted == "cbx-cs"
+        # loaded=true v model-info → proxy hlásí modely služby z konfigurace
+        st = admin.get("/mgmt/v1/models/status").json()
+        assert st["backends"]["cbx"]["loaded"] == ["cbx-cs"] and "cbx-cs" in st["loaded"]
+
+        n = len(upstream.calls)
+        assert admin.post("/api/chat", json=chat).status_code == 200
+        seq = [(c.url.host, c.url.path) for c in upstream.calls[n:]]
+        assert seq.index(("chatterbox.test", "/api/unload")) < seq.index(("ollama.test", "/api/chat"))
+        assert ("chatterbox.test", "/api/model-info") in seq       # ověření, že VRAM je prázdná
+        assert sched.admitted == "gemma4:12b" and sched.last_evict_error is None
+        assert admin.get("/mgmt/v1/models/status").json()["backends"]["cbx"]["loaded"] == []
+        # /models/load bez /api/load → služba nahraje model sama při prvním dotazu → ready
+        r = admin.post("/mgmt/v1/models/load", json={"model": "cbx-cs", "wait_s": 5})
+        assert r.json()["loaded"] is True and r.json()["status"] == "ready"
+    finally:
+        admin.delete("/mgmt/v1/providers/cbx")
+
+
 def test_purge_removes_result_files(tmp_path):
     path = tmp_path / "1.mp3"
     path.write_bytes(b"ID3")

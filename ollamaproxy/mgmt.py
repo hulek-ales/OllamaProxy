@@ -133,7 +133,8 @@ async def models(request: Request):
         entry = {"kind": prov["kind"],
                  "base_url": client_base_url(proxy_root(request), prov["slug"], prov["kind"])}
         try:
-            entry["models"] = [m for m in await fetch_models(client, prov["kind"], prov["base_url"], prov["api_key"])
+            entry["models"] = [m for m in await fetch_models(client, prov["kind"], prov["base_url"], prov["api_key"],
+                                                             fallback=provider_models(prov))
                                if p.may_model(m)]
             entry["ok"] = True
         except Exception as exc:
@@ -202,8 +203,9 @@ async def backends_status(client) -> dict:
     out = {}
     for prov in db.gpu_providers():
         try:
-            out[prov["slug"]] = {"ok": True, "loaded": await backend_ps(client, prov["base_url"], prov["api_key"]),
-                                 "models": provider_models(prov)}
+            out[prov["slug"]] = {"ok": True, "models": provider_models(prov),
+                                 "loaded": await backend_ps(client, prov["base_url"], prov["api_key"],
+                                                            provider_models(prov))}
         except Exception as exc:
             out[prov["slug"]] = {"ok": False, "error": str(exc), "loaded": [], "models": provider_models(prov)}
     return out
@@ -489,7 +491,8 @@ async def test_provider(slug: str, request: Request):
     if row is None:
         raise HTTPException(404, "no such provider")
     try:
-        models_ = await fetch_models(request.app.state.client, row["kind"], row["base_url"], row["api_key"])
+        models_ = await fetch_models(request.app.state.client, row["kind"], row["base_url"], row["api_key"],
+                                     fallback=provider_models(row))
         return {"ok": True, "models": models_}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

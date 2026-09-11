@@ -8,6 +8,10 @@ ať uvolní VRAM. Služba musí umět (viz docs/GPU-BACKEND.md):
     GET  /api/ps       {"models": [{"name": "tts-cs", …}]}    co má v paměti (jako Ollama)
     POST /api/unload   {"model"?: "tts-cs"}                   uvolnit VRAM (bez modelu = vše)
     POST /api/load     {"model": "tts-cs"}                    nepovinné; jinak nahraje první dotaz
+
+Server s jedním modelem bez /api/ps a /v1/models (Chatterbox-TTS-Server) projde
+taky: stav se čte z GET /api/model-info {"loaded": bool} a seznam modelů je ten
+z konfigurace poskytovatele.
 """
 
 import json
@@ -67,10 +71,18 @@ def provider_models(row: dict) -> list:
 
 # ------------------------------------------------ kontrakt GPU služby
 
-async def backend_ps(client: httpx.AsyncClient, base_url: str, api_key: str) -> list:
-    """Modely, které GPU služba drží v paměti (GET /api/ps, stejný tvar jako Ollama)."""
-    r = await client.get(base_url.rstrip("/") + "/api/ps", headers=auth_headers("gpu", api_key, {}),
-                         timeout=5.0)
+async def backend_ps(client: httpx.AsyncClient, base_url: str, api_key: str, models=()) -> list:
+    """Modely, které GPU služba drží v paměti (GET /api/ps, stejný tvar jako Ollama).
+    Bez /api/ps (404) se zkusí GET /api/model-info {"loaded": bool} — server s jedním
+    modelem (Chatterbox-TTS-Server); `loaded` = všechny modely služby z konfigurace."""
+    base = base_url.rstrip("/")
+    headers = auth_headers("gpu", api_key, {})
+    r = await client.get(base + "/api/ps", headers=headers, timeout=5.0)
+    if r.status_code == 404:
+        r = await client.get(base + "/api/model-info", headers=headers, timeout=5.0)
+        r.raise_for_status()
+        info = r.json()
+        return list(models) if isinstance(info, dict) and info.get("loaded") else []
     r.raise_for_status()
     return [m.get("name") or m.get("model") for m in r.json().get("models") or []
             if m.get("name") or m.get("model")]
@@ -94,9 +106,20 @@ async def backend_load(client: httpx.AsyncClient, base_url: str, api_key: str, m
     return True
 
 
-async def fetch_models(client: httpx.AsyncClient, kind: str, base_url: str, api_key: str) -> list:
+async def fetch_models(client: httpx.AsyncClient, kind: str, base_url: str, api_key: str,
+                       fallback=None) -> list:
+    """Modely upstreamu. `fallback` (typ gpu): co vrátit, když služba /v1/models nemá (404) —
+    seznam z konfigurace poskytovatele."""
     base = base_url.rstrip("/")
     headers = auth_headers(kind, api_key, {})
+    if kind == "gpu" and fallback is not None:
+        r = await client.get(base + "/v1/models", headers=headers, timeout=15.0)
+        if r.status_code == 404:
+            return list(fallback)
+        r.raise_for_status()
+        data = r.json()
+        items = data.get("data") if isinstance(data, dict) else data
+        return sorted(m.get("id") for m in items or [] if isinstance(m, dict) and m.get("id"))
     if kind == "ollama":
         r = await client.get(base + "/api/tags", headers=headers, timeout=15.0)
         r.raise_for_status()
