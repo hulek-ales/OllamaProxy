@@ -42,8 +42,11 @@ WAIT_HEADER = "x-opx-wait"
 # POST na tyto cesty se logují jako inference
 INFERENCE_RE = re.compile(
     r"(/api/generate|/api/chat|/chat/completions|/completions|/messages|/responses"
-    r"|:generateContent|:streamGenerateContent)$"
+    r"|:generateContent|:streamGenerateContent"
+    r"|/audio/speech|/audio/transcriptions|/audio/translations)$"
 )
+# odpovědi, ze kterých se dají číst tokeny; binárka (audio) se do sběrače nesype
+TEXTUAL_CT = ("application/json", "application/x-ndjson", "text/")
 # POST na tyto cesty lokální Ollamy jdou přes plánovač modelů (embeddingy model taky nahrávají)
 SCHED_RE = re.compile(r"(/api/generate|/api/chat|/api/embed|/api/embeddings"
                       r"|/chat/completions|/completions|/embeddings)$")
@@ -95,6 +98,28 @@ def request_model(path: str, body_obj: dict):
     if found:
         return found.group(1)
     return None
+
+
+def text_units(path: str, req_obj: dict):
+    """U syntézy řeči není co počítat na tokeny — do prompt_tokens jde počet znaků vstupu,
+    takže ceník v USD za 1M znaků (OpenAI TTS) dá správnou cenu."""
+    if path.endswith("/audio/speech") and isinstance(req_obj.get("input"), str):
+        return len(req_obj["input"])
+    return None
+
+
+def gpu_timeout() -> httpx.Timeout:
+    """Dotaz na GPU službu: nejdelší ticho na lince, pak ji proxy považuje za mrtvou a kartu uvolní."""
+    try:
+        seconds = float(db.setting("gpu_request_timeout_s") or 900)
+    except ValueError:
+        seconds = 900.0
+    return httpx.Timeout(seconds if seconds > 0 else None, connect=10.0)
+
+
+def is_textual(content_type) -> bool:
+    ct = (content_type or "").lower()
+    return not ct or any(ct.startswith(t) for t in TEXTUAL_CT)
 
 
 def wait_limit(request: Request):
@@ -189,9 +214,10 @@ def deny_model(request: Request, provider: str, principal, model: str, req_obj: 
 async def forward(request: Request, url: str, headers: dict, body: bytes, *,
                   provider: str, principal, pricing: dict = None,
                   params=None, telemetry: bool = False, req_obj: dict = None,
-                  sched_model: str = None, model_filter=None):
+                  sched_model: str = None, model_filter=None, timeout=None):
     """Přepošle dotaz a odpověď streamuje dál. `sched_model` = jít přes plánovač modelů,
-    `model_filter` = ořezat seznam modelů v odpovědi (callable název → bool)."""
+    `model_filter` = ořezat seznam modelů v odpovědi (callable název → bool),
+    `timeout` = httpx.Timeout pro tenhle dotaz (GPU služby), jinak výchozí klienta."""
     client: httpx.AsyncClient = request.app.state.client
     path = request.url.path
     should_log = request.method == "POST" and INFERENCE_RE.search(path) is not None
@@ -229,7 +255,7 @@ async def forward(request: Request, url: str, headers: dict, body: bytes, *,
         snap["queue_ms"] = queue_ms
 
     upstream_req = client.build_request(request.method, url, content=body, headers=headers,
-                                        params=params)
+                                        params=params, timeout=timeout)
     try:
         upstream = await client.send(upstream_req, stream=True)
     except Exception as exc:
@@ -257,14 +283,15 @@ async def forward(request: Request, url: str, headers: dict, body: bytes, *,
         return JSONResponse(filter_model_list(path, payload, model_filter))
 
     collector = Collector(log_bodies) if should_log else None
+    parse = collector is not None and is_textual(upstream.headers.get("content-type"))
 
     async def gen():
         try:
             async for chunk in upstream.aiter_bytes():
-                if collector is not None:
+                if parse:
                     collector.feed(chunk)
                 yield chunk
-            if collector is not None:
+            if parse:
                 collector.finish()
         finally:
             await upstream.aclose()
@@ -273,6 +300,8 @@ async def forward(request: Request, url: str, headers: dict, body: bytes, *,
             if collector is not None:
                 bump(-1)
                 pt, ct = collector.prompt_tokens, collector.completion_tokens
+                if pt is None:
+                    pt = text_units(path, req_obj)
                 model = collector.model or req_model
                 error = collector.error
                 if error is None and upstream.status_code >= 400:
@@ -337,6 +366,14 @@ async def provider_proxy(slug: str, path: str, request: Request):
     if limited is not None:
         return limited
 
+    return await _forward_provider(request, prov, "/" + path, body, req_obj, model, principal)
+
+
+async def _forward_provider(request: Request, prov: dict, path: str, body: bytes, req_obj: dict,
+                            model, principal):
+    """Dotaz na poskytovatele z tabulky providers. Typ `gpu` sdílí kartu s Ollamou:
+    POST s modelem jde přes plánovač a má vlastní timeout (mrtvá služba nesmí držet GPU)."""
+    slug = prov["slug"]
     incoming = {k: v for k, v in request.headers.items()
                 if k.lower() not in STRIP_REQUEST and k.lower() not in CLIENT_AUTH}
     headers = auth_headers(prov["kind"], prov["api_key"], incoming)
@@ -349,11 +386,14 @@ async def provider_proxy(slug: str, path: str, request: Request):
         pricing = parse_pricing(prov["pricing_json"])
     except Exception:
         pricing = {}
-    url = prov["base_url"].rstrip("/") + "/" + path
-    model_filter = _model_filter(principal) if request.method == "GET" and ("/" + path).endswith(LIST_PATHS) else None
+    url = prov["base_url"].rstrip("/") + path
+    model_filter = _model_filter(principal) if request.method == "GET" and path.endswith(LIST_PATHS) else None
+    gpu = prov["kind"] == "gpu"
+    sched_model = model if gpu and request.method == "POST" else None
     return await forward(request, url, headers, body, provider=slug, principal=principal,
                          pricing=pricing, params=params, telemetry=False, req_obj=req_obj,
-                         model_filter=model_filter)
+                         sched_model=sched_model, model_filter=model_filter,
+                         timeout=gpu_timeout() if gpu else None)
 
 
 @router.api_route("/{path:path}", methods=ALL_METHODS, include_in_schema=False)
@@ -364,6 +404,22 @@ async def ollama_proxy(path: str, request: Request):
     body = await request.body()
     req_obj = parse_body(body) if request.method == "POST" else {}
     model = request_model("/" + path, req_obj)
+
+    # směrování podle modelu: model GPU služby (TTS…) jde do jejího kontejneru, ne do Ollamy
+    gpu_slug = db.provider_for_model(model) if request.method == "POST" and model else None
+    if gpu_slug:
+        prov = db.get_provider(gpu_slug)
+        if principal is None:
+            return _unauthorized()
+        if not principal.may_use(gpu_slug):
+            return JSONResponse({"error": "this key may not use provider '" + gpu_slug + "'"}, status_code=403)
+        if not principal.may_model(model):
+            return deny_model(request, gpu_slug, principal, model, req_obj)
+        limited = rate_limited(request, gpu_slug, principal, model, req_obj)
+        if limited is not None:
+            return limited
+        return await _forward_provider(request, prov, "/" + path, body, req_obj, model, principal)
+
     if model and principal is not None and not principal.may_model(model):
         return deny_model(request, "ollama", principal, model, req_obj)
     limited = rate_limited(request, "ollama", principal, model, req_obj)

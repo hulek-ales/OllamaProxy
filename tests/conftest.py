@@ -32,6 +32,9 @@ class Upstream:
         self.calls = []
         self.callbacks = []
         self.slow_s = 1.5   # model "slow" odpovídá tak dlouho (test přerušení úloh)
+        self.loaded = {"gemma4:12b"}   # co Ollama hlásí v /api/ps; keep_alive 0 model vyhodí
+        self.tts_loaded = set()        # totéž u falešné GPU služby tts.test
+        self.tts_slow_s = 0.0          # syntéza trvá tak dlouho (test řazení za TTS)
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request)
@@ -39,6 +42,10 @@ class Upstream:
         if host == "callback.test":
             self.callbacks.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True})
+        if host == "tts.test":
+            return await self.tts(path, request)
+        if host == "chatterbox.test":
+            return await self.chatterbox(path, request)
         if host == "ollama.test" and path == "/api/chat":
             body = json.loads(request.content)
             if body.get("model") == "slow":
@@ -54,7 +61,10 @@ class Upstream:
         if host == "ollama.test":
             if path == "/api/ps":
                 return httpx.Response(200, json={"models": [
-                    {"name": "gemma4:12b", "size": 1000, "size_vram": 1000}]})
+                    {"name": m, "size": 1000, "size_vram": 1000} for m in sorted(self.loaded)]})
+            if path in ("/api/generate", "/api/embed") and json.loads(request.content).get("keep_alive") == 0:
+                self.loaded.discard(json.loads(request.content).get("model"))
+                return httpx.Response(200, json={"done": True})
             if path == "/api/tags":
                 return httpx.Response(200, json={"models": [{"name": "gemma4:12b"}, {"name": "llama3:8b"},
                                                             {"name": "nomic-embed-text:latest"}]})
@@ -98,6 +108,51 @@ class Upstream:
                     b'event: message_stop\ndata: {"type":"message_stop"}\n\n'),
                     headers={"content-type": "text/event-stream"})
         return httpx.Response(404, json={"error": "unknown fake path " + path})
+
+    async def tts(self, path: str, request: httpx.Request) -> httpx.Response:
+        """Falešná GPU služba podle docs/GPU-BACKEND.md."""
+        if path == "/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "tts-cs"}]})
+        if path == "/api/ps":
+            return httpx.Response(200, json={"models": [{"name": m} for m in sorted(self.tts_loaded)]})
+        if path == "/api/unload":
+            model = json.loads(request.content or b"{}").get("model")
+            if model:
+                self.tts_loaded.discard(model)
+            else:
+                self.tts_loaded.clear()
+            return httpx.Response(200, json={"ok": True})
+        if path == "/api/load":
+            self.tts_loaded.add(json.loads(request.content)["model"])
+            return httpx.Response(200, json={"ok": True})
+        if path == "/v1/audio/speech":
+            body = json.loads(request.content)
+            self.tts_loaded.add(body["model"])
+            if self.tts_slow_s:
+                await asyncio.sleep(self.tts_slow_s)
+            audio = b"ID3" + b"\x00" * max(1, len(body.get("input", "")) * 10)
+            return httpx.Response(200, content=audio, headers={"content-type": "audio/mpeg"})
+        return httpx.Response(404, json={"error": "unknown tts path " + path})
+
+    async def chatterbox(self, path: str, request: httpx.Request) -> httpx.Response:
+        """Falešný Chatterbox-TTS-Server: jeden model, žádné /api/ps ani /v1/models,
+        stav v /api/model-info, /api/unload bez těla."""
+        if path == "/api/model-info":
+            return httpx.Response(200, json={"loaded": bool(self.tts_loaded), "type": "multilingual",
+                                             "device": "cuda"})
+        if path == "/api/unload":
+            self.tts_loaded.clear()
+            return httpx.Response(200, json={"status": "unloaded"})
+        if path == "/v1/audio/voices":
+            return httpx.Response(200, json={"voices": [{"id": "jirka.wav"}]})
+        if path == "/v1/audio/speech":
+            body = json.loads(request.content)
+            self.tts_loaded.add("chatterbox")
+            if self.tts_slow_s:
+                await asyncio.sleep(self.tts_slow_s)
+            return httpx.Response(200, content=b"RIFF" + b"\x00" * 64,
+                                  headers={"content-type": "audio/wav"})
+        return httpx.Response(404, json={"detail": "Not Found"})
 
 
 @pytest.fixture(scope="session")

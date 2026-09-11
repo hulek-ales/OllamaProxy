@@ -15,7 +15,7 @@ from .auth import (SESSION_COOKIE, csrf_token, hash_password, make_session, new_
 from .db import PROVIDER_KINDS, db
 from .jobs import job_view, worker
 from .providers import (DEFAULT_BASE_URL, KIND_LABELS, client_base_url, fetch_models,
-                        mask_key, parse_pricing)
+                        mask_key, parse_pricing, provider_models)
 from .scheduler import sched
 
 router = APIRouter(prefix="/ui", tags=["ui"], include_in_schema=False)
@@ -293,6 +293,10 @@ async def providers_save(request: Request):
         pricing = parse_pricing(form.get("pricing") or "{}")
     except Exception as exc:
         return back("/ui/providers?edit=" + slug, err="Ceník není platný JSON: " + str(exc))
+    models = parse_model_patterns(form.get("models") or "") if kind == "gpu" else []
+    if kind == "gpu" and not models:
+        return back("/ui/providers?edit=" + slug,
+                    err="GPU služba potřebuje seznam modelů, které obsluhuje (podle nich se směruje).")
     existing = db.get_provider(slug)
     if form.get("clear_key"):
         key_arg = ""
@@ -301,7 +305,8 @@ async def providers_save(request: Request):
     else:
         key_arg = None if existing else ""
     db.save_provider(slug, name, kind, base_url, api_key=key_arg, pricing=pricing,
-                     inject_usage=bool(form.get("inject_usage")), enabled=bool(form.get("enabled")))
+                     inject_usage=bool(form.get("inject_usage")), enabled=bool(form.get("enabled")),
+                     models=models)
     return back("/ui/providers", msg=("Poskytovatel „" + name + "“ uložen."))
 
 
@@ -327,7 +332,8 @@ async def providers_test(slug: str, request: Request):
     if row is None:
         return back("/ui/providers", err="Poskytovatel neexistuje.")
     try:
-        models = await fetch_models(request.app.state.client, row["kind"], row["base_url"], row["api_key"])
+        models = await fetch_models(request.app.state.client, row["kind"], row["base_url"], row["api_key"],
+                                    fallback=provider_models(row))
     except Exception as exc:
         return back("/ui/providers", err=slug + ": " + str(exc))
     sample = ", ".join(models[:8]) + (" …" if len(models) > 8 else "")
@@ -417,7 +423,7 @@ async def settings_page(request: Request):
         status["loaded"] = []
     return render(request, "settings.html", user, settings=db.public_settings(),
                   db_mb=round(db.size_bytes() / 1048576, 1), root=proxy_root(request), sched=status,
-                  jobs=worker.snapshot())
+                  jobs=worker.snapshot(), gpu_backends=[p["slug"] for p in db.gpu_providers()])
 
 
 @router.post("/settings")
@@ -438,7 +444,8 @@ async def settings_save(request: Request):
     db.set_setting("sched_enabled", "1" if form.get("sched_enabled") else "0")
     db.set_setting("jobs_enabled", "1" if form.get("jobs_enabled") else "0")
     for key, default in (("sched_hold_s", 10), ("sched_max_wait_s", 90), ("jobs_max_wait_s", 900),
-                         ("jobs_idle_s", 60), ("jobs_preempt_s", 0)):
+                         ("jobs_idle_s", 60), ("jobs_preempt_s", 0), ("gpu_evict_timeout_s", 60),
+                         ("gpu_request_timeout_s", 900)):
         try:
             db.set_setting(key, max(0.0, float(form.get(key) or default)))
         except ValueError:

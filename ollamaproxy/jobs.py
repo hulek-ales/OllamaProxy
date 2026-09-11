@@ -14,15 +14,20 @@ to hodí. Pracovník (`worker`) běží v jednom tasku a rozhoduje takto:
   * drží se modelu ve VRAM, dokud pro něj má úlohy; na jiný model přepne, až
     pro aktuální nic nezbývá, nebo když nejstarší úloha jiného modelu čeká déle
     než `jobs_max_wait_s`;
-  * úlohy pro komerční poskytovatele GPU nepotřebují a jedou hned.
+  * úlohy pro komerční poskytovatele GPU nepotřebují a jedou hned; úlohy pro
+    lokální GPU služby (poskytovatel typu `gpu`, třeba TTS) jdou přes plánovač
+    stejně jako Ollama — sdílejí s ní kartu.
 
 Výsledek se uloží do tabulky jobs (celá odpověď upstreamu, vždy bez streamu),
 zapíše se i do běžného logu `requests` (tokeny, cena, Spotřeba) a volitelně
-se pošle na `callback_url`.
+se pošle na `callback_url`. Binární odpověď (audio) se do JSON nevejde: uloží se
+jako soubor do `OLLAMA_JOBS_DIR` a `result` má jen `{file, content_type, bytes}`;
+obsah dá `GET /mgmt/v1/jobs/{id}/result`.
 """
 
 import asyncio
 import json
+import os
 import time
 from collections import deque
 
@@ -39,8 +44,26 @@ MAX_ATTEMPTS = 3
 ALLOWED_JOB_PATHS = (
     "/api/chat", "/api/generate", "/api/embed", "/api/embeddings",
     "/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/responses",
-    "/v1/messages",
+    "/v1/messages", "/v1/audio/speech",
 )
+# přípona souboru s binárním výsledkem podle content-type odpovědi
+AUDIO_EXT = {"audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav",
+             "audio/wave": "wav", "audio/ogg": "ogg", "audio/opus": "opus", "audio/flac": "flac",
+             "audio/aac": "aac", "audio/webm": "webm", "audio/pcm": "pcm"}
+
+
+def gpu_slugs() -> set:
+    return {p["slug"] for p in db.gpu_providers()}
+
+
+def uses_gpu(provider: str) -> bool:
+    """Úloha potřebuje kartu: hlavní Ollama, nebo lokální GPU služba."""
+    return provider == "ollama" or provider in gpu_slugs()
+
+
+def result_ext(content_type: str) -> str:
+    ct = (content_type or "").split(";")[0].strip().lower()
+    return AUDIO_EXT.get(ct, "bin")
 
 
 # ---------------------------------------------------------- limit dotazů
@@ -174,7 +197,8 @@ class JobWorker:
         queued = db.queued_jobs()
         if not queued:
             return None
-        commercial = [j for j in queued if j["provider"] != "ollama"]
+        gpu = gpu_slugs()
+        commercial = [j for j in queued if j["provider"] != "ollama" and j["provider"] not in gpu]
         if commercial:
             return commercial[0]
         if sched.interactive_pending():
@@ -215,12 +239,13 @@ class JobWorker:
         self.current_task = asyncio.get_running_loop().create_task(self._execute(job))
         self._preempting = False
         preempt_s = self._num("jobs_preempt_s", 0)
+        gpu = uses_gpu(job["provider"])
         try:
             while True:
                 done, _ = await asyncio.wait({self.current_task}, timeout=0.5)
                 if done:
                     break
-                if (preempt_s > 0 and job["provider"] == "ollama" and not self._preempting
+                if (preempt_s > 0 and gpu and not self._preempting
                         and sched.oldest_interactive_wait_s() > preempt_s
                         and any(w.model != job["model"] for w in sched.waiting if w.interactive)):
                     self._preempting = True
@@ -260,6 +285,8 @@ class JobWorker:
         provider = job["provider"]
         headers = {"content-type": "application/json"}
         pricing = {}
+        gpu = provider == "ollama"      # jde přes plánovač (Ollama nebo GPU služba)
+        timeout = 3600.0
         if provider == "ollama":
             url = config.UPSTREAM + job["path"]
         else:
@@ -273,12 +300,15 @@ class JobWorker:
                 pricing = parse_pricing(prov["pricing_json"])
             except Exception:
                 pricing = {}
+            if prov["kind"] == "gpu":
+                gpu = True
+                timeout = self._num("gpu_request_timeout_s", 900) or None
 
         acquired = False
         queue_ms = 0
         started = time.time()
         try:
-            if provider == "ollama":
+            if gpu:
                 queue_ms = round(await sched.acquire(model, interactive=False) * 1000)
                 acquired = True
             snap = host_snapshot()
@@ -286,14 +316,19 @@ class JobWorker:
                 snap.update(await gpu_snapshot(client, config.UPSTREAM, model))
             snap["concurrent"] = bump(1)
             try:
-                resp = await client.post(url, content=body, headers=headers, timeout=3600.0)
+                resp = await client.post(url, content=body, headers=headers, timeout=timeout)
             finally:
                 bump(-1)
             raw = resp.content
+            content_type = resp.headers.get("content-type", "")
+            binary = resp.status_code < 400 and not _textual(content_type)
             collector = Collector(True)
-            collector.feed(raw)
-            collector.finish()
+            if not binary:
+                collector.feed(raw)
+                collector.finish()
             pt, ct = collector.prompt_tokens, collector.completion_tokens
+            if pt is None and job["path"].endswith("/audio/speech") and isinstance(body_obj.get("input"), str):
+                pt = len(body_obj["input"])     # syntéza řeči: znaky místo tokenů (ceník za 1M znaků)
             used_model = collector.model or model
             error = collector.error
             if error is None and resp.status_code >= 400:
@@ -312,14 +347,24 @@ class JobWorker:
                 "error": error, "key_name": job.get("key_name"), "queue_ms": queue_ms,
                 "job_id": job["id"], **snap,
             })
-            try:
-                result_json = json.dumps(json.loads(raw), ensure_ascii=False)
-            except Exception:
-                result_json = json.dumps({"raw": raw.decode("utf-8", "replace")})
+            result_path = None
+            if binary:
+                # audio a jiné binárky do souboru; v JSON zůstane jen odkaz
+                result_path = os.path.join(config.JOBS_DIR, str(job["id"]) + "." + result_ext(content_type))
+                os.makedirs(config.JOBS_DIR, exist_ok=True)
+                with open(result_path, "wb") as f:
+                    f.write(raw)
+                result_json = json.dumps({"file": result_path, "content_type": content_type.split(";")[0],
+                                          "bytes": len(raw)})
+            else:
+                try:
+                    result_json = json.dumps(json.loads(raw), ensure_ascii=False)
+                except Exception:
+                    result_json = json.dumps({"raw": raw.decode("utf-8", "replace")})
             db.finish_job(job["id"], "done" if error is None else "error", status_code=resp.status_code,
-                          result_json=result_json, error=error, request_id=rid)
+                          result_json=result_json, error=error, request_id=rid, result_path=result_path)
             self.runs += 1
-            self.last_model = model if provider == "ollama" else self.last_model
+            self.last_model = model if gpu else self.last_model
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -345,11 +390,17 @@ def _ts(iso: str) -> float:
     return datetime.fromisoformat(iso).timestamp()
 
 
+def _textual(content_type: str) -> bool:
+    ct = (content_type or "").lower()
+    return not ct or ct.startswith(("application/json", "application/x-ndjson", "text/"))
+
+
 def job_view(job: dict, with_bodies: bool = False) -> dict:
     out = {k: job.get(k) for k in (
         "id", "batch_id", "key_name", "status", "priority", "provider", "path", "model",
         "callback_url", "not_before", "created_at", "started_at", "finished_at", "attempts",
         "status_code", "error", "request_id", "callback_status")}
+    out["result_url"] = "/mgmt/v1/jobs/" + str(job.get("id")) + "/result" if job.get("result_path") else None
     if with_bodies:
         for src, dst in (("request_json", "request"), ("result_json", "result")):
             raw = job.get(src)
