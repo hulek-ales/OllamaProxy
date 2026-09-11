@@ -33,8 +33,11 @@ import urllib.request
 
 
 class OpxError(Exception):
+    """Chyba proxy: HTTP stav s tělem, nebo nedostupné spojení (status None)."""
+
     def __init__(self, status, body):
-        super().__init__("HTTP " + str(status) + ": " + str(body)[:300])
+        prefix = ("HTTP " + str(status) + ": ") if status is not None else "spojení selhalo: "
+        super().__init__(prefix + str(body)[:300])
         self.status = status
         self.body = body
 
@@ -65,6 +68,9 @@ class OpxClient:
             except Exception:
                 parsed = raw.decode("utf-8", "replace")
             raise OpxError(exc.code, parsed) from None
+        except (urllib.error.URLError, OSError) as exc:
+            # proxy neběží, špatná adresa, vypršel timeout — ať volající chytá jedno
+            raise OpxError(None, getattr(exc, "reason", None) or exc) from None
 
     def _call(self, method: str, path: str, body=None, headers=None, timeout=None):
         raw, _ = self._raw(method, path, body, headers, timeout)
