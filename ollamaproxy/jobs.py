@@ -46,6 +46,13 @@ ALLOWED_JOB_PATHS = (
     "/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/responses",
     "/v1/messages", "/v1/audio/speech",
 )
+# Úloha je z definice bez streamu, ale `"stream": false` se smí dopsat jen tam, kde
+# to endpoint zná. OpenAI na neznámé pole v těle odpoví 400, takže syntéza řeči
+# ani embeddingy ho dostat nesmí — Ollama je shovívavější, tady rozhoduje ta přísnější.
+STREAMABLE_JOB_PATHS = (
+    "/api/chat", "/api/generate",
+    "/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/messages",
+)
 # přípona souboru s binárním výsledkem podle content-type odpovědi
 AUDIO_EXT = {"audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav",
              "audio/wave": "wav", "audio/ogg": "ogg", "audio/opus": "opus", "audio/flac": "flac",
@@ -278,7 +285,7 @@ class JobWorker:
             body_obj = json.loads(job["request_json"] or "{}")
         except Exception:
             body_obj = {}
-        if isinstance(body_obj, dict):
+        if isinstance(body_obj, dict) and job["path"] in STREAMABLE_JOB_PATHS:
             body_obj["stream"] = False
         body = json.dumps(body_obj, ensure_ascii=False).encode()
         model = job.get("model")
