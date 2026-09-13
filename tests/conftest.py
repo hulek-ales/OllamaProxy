@@ -86,6 +86,13 @@ class Upstream:
                     headers={"content-type": "application/x-ndjson"})
             return httpx.Response(200, text="Ollama is running")
         if host == "api.openai.test":
+            if path == "/v1/audio/speech":
+                body = json.loads(request.content)
+                if "stream" in body:      # OpenAI na neznámé pole odpoví 400
+                    return httpx.Response(400, json={"error": {
+                        "message": "Unrecognized request argument supplied: stream"}})
+                return httpx.Response(200, content=b"ID3" + b"\x00" * 32,
+                                      headers={"content-type": "audio/mpeg"})
             if path == "/v1/models":
                 return httpx.Response(200, json={"data": [{"id": "gpt-4o-mini"}]})
             if path == "/v1/chat/completions":

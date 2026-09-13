@@ -1,5 +1,6 @@
 """Fronta úloh: zadání, zpracování pracovníkem, přednost interaktivních dotazů, limity, callback."""
 
+import json
 import time
 
 import pytest
@@ -229,3 +230,28 @@ def test_status_endpoints_include_jobs(admin):
     assert admin.get("/mgmt/v1/health").json()["jobs"]["enabled"] is True
     page = admin.get("/ui/settings").text
     assert "Fronta úloh" in page
+
+
+def test_commercial_speech_job_keeps_the_body_clean(admin, fast, upstream):
+    """Syntéza řeči přes komerční API: do těla se nesmí dopsat `stream`.
+
+    Úloha je vždycky bez streamu, jenže `/v1/audio/speech` takové pole nezná a
+    OpenAI na neznámý argument odpoví 400 — celý díl by skončil chybou."""
+    ensure_openai(admin)
+    jid = admin.post("/mgmt/v1/jobs", json={
+        "path": "/v1/audio/speech", "provider": "openai",
+        "body": {"model": "gpt-4o-mini-tts", "input": "Dobré ráno.", "voice": "alloy",
+                 "response_format": "mp3"}}).json()["id"]
+    job = wait_job(admin, jid)
+    assert job["status"] == "done", job.get("error")
+    assert job["result"]["content_type"] == "audio/mpeg"
+
+    audio = admin.get("/mgmt/v1/jobs/" + str(jid) + "/result")
+    assert audio.status_code == 200 and audio.content.startswith(b"ID3")
+
+    sent = [c for c in upstream.calls
+            if c.url.host == "api.openai.test" and c.url.path == "/v1/audio/speech"][-1]
+    assert "stream" not in json.loads(sent.content)
+
+    row = db.get_request(job["request_id"])
+    assert row["provider"] == "openai" and row["prompt_tokens"] == len("Dobré ráno.")
