@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{% block title %}Ollama proxy{% endblock %} · Ollama proxy</title>
+{% if refresh %}<meta http-equiv="refresh" content="{{ refresh }}">{% endif %}
 <style>
 :root{--bg:#12151a;--bg2:#0d1117;--panel:#161b22;--line:#21262d;--line2:#30363d;--fg:#c9d1d9;--fg2:#e6edf3;--mute:#6e7781;--link:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}
 *{box-sizing:border-box}
@@ -53,6 +54,7 @@ code{background:var(--bg2);border:1px solid var(--line);border-radius:3px;paddin
 .help{color:var(--mute);font-size:12px;margin-top:3px}
 .keybox{font-size:16px;padding:12px;background:var(--bg2);border:1px solid var(--ok);border-radius:6px;word-break:break-all;color:var(--fg2);user-select:all}
 .tblwrap{overflow-x:auto}
+.statusbar{display:flex;gap:12px;flex-wrap:wrap;align-items:baseline;padding:8px 12px;margin:0 0 14px;border:1px solid var(--line);border-radius:6px;background:var(--panel);font-size:13px}
 @media (max-width:700px){.kv{grid-template-columns:1fr}}
 </style>
 </head>
@@ -62,6 +64,7 @@ code{background:var(--bg2);border:1px solid var(--line);border-radius:3px;paddin
   <a class="brand" href="/ui">Ollama proxy</a>
   <nav>
     <a href="/ui" class="{{ 'active' if path in ('/ui', '/ui/') or path.startswith('/ui/r/') else '' }}">Log</a>
+    <a href="/ui/stav" class="{{ 'active' if path.startswith('/ui/stav') else '' }}">Stav</a>
     <a href="/ui/usage" class="{{ 'active' if path.startswith('/ui/usage') else '' }}">Spotřeba</a>
     <a href="/ui/jobs" class="{{ 'active' if path.startswith('/ui/jobs') else '' }}">Úlohy</a>
     <a href="/ui/providers" class="{{ 'active' if path.startswith('/ui/providers') else '' }}">Poskytovatelé</a>
