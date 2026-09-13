@@ -35,6 +35,7 @@ class Upstream:
         self.loaded = {"gemma4:12b"}   # co Ollama hlásí v /api/ps; keep_alive 0 model vyhodí
         self.tts_loaded = set()        # totéž u falešné GPU služby tts.test
         self.tts_slow_s = 0.0          # syntéza trvá tak dlouho (test řazení za TTS)
+        self.vram_ratio = 1.0          # kolik z modelu je ve VRAM (0.0 = Ollama spadla na CPU)
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request)
@@ -61,7 +62,9 @@ class Upstream:
         if host == "ollama.test":
             if path == "/api/ps":
                 return httpx.Response(200, json={"models": [
-                    {"name": m, "size": 1000, "size_vram": 1000} for m in sorted(self.loaded)]})
+                    {"name": m, "size": 1000, "size_vram": int(1000 * self.vram_ratio),
+                     "details": {"parameter_size": "12B", "quantization_level": "Q4_K_M"}}
+                    for m in sorted(self.loaded)]})
             if path in ("/api/generate", "/api/embed") and json.loads(request.content).get("keep_alive") == 0:
                 self.loaded.discard(json.loads(request.content).get("model"))
                 return httpx.Response(200, json={"done": True})

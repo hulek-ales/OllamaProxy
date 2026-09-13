@@ -6,7 +6,7 @@ import os
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from . import config
@@ -17,6 +17,7 @@ from .jobs import job_view, worker
 from .providers import (DEFAULT_BASE_URL, KIND_LABELS, client_base_url, fetch_models,
                         mask_key, parse_pricing, provider_models)
 from .scheduler import sched
+from .telemetry import active, host_snapshot, ollama_status
 
 router = APIRouter(prefix="/ui", tags=["ui"], include_in_schema=False)
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
@@ -56,7 +57,22 @@ def fmt_int(val):
 templates.env.filters["fmt"] = fmt
 templates.env.filters["ts"] = fmt_ts
 templates.env.filters["money"] = fmt_money
+def fmt_bytes(val):
+    """Velikost modelu lidsky — GB jsou to, co se porovnává s VRAM na kartě."""
+    try:
+        val = float(val or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if val <= 0:
+        return "0 B"
+    for unit in ("B", "kB", "MB", "GB", "TB"):
+        if val < 1024 or unit == "TB":
+            return (("%.1f" % val).rstrip("0").rstrip(".")) + " " + unit
+        val /= 1024
+
+
 templates.env.filters["num"] = fmt_int
+templates.env.filters["size"] = fmt_bytes
 
 
 # ---------------------------------------------------------------- pomocné
@@ -174,10 +190,78 @@ async def ui_list(request: Request):
         "model": filters["model"], "provider": filters["provider"], "placement": filters["placement"],
         "key": filters["key_name"], "user": filters["user"], "status": filters["status"],
         "since": filters["since"], "q": filters["q"]}.items() if v)
+    live = await ollama_status(request.app.state.client, config.UPSTREAM, light=True)
     return render(request, "list.html", user, rows=rows, total=total, page=page_no, per=per,
+                  live=live, live_sched=sched.snapshot(), live_jobs=worker.snapshot(),
+                  live_label=PLACEMENT_LABEL,
                   filters=filters, day=day, week=week, base_qs=base_qs,
                   providers=["ollama"] + [p["slug"] for p in db.list_providers()],
                   keys=db.distinct("key_name"))
+
+
+# ------------------------------------------------------------------ stav
+
+PLACEMENT_LABEL = {
+    "gpu": "celý na GPU",
+    "split": "část v RAM — model se nevešel do VRAM",
+    "cpu": "na CPU — Ollama nepočítá na kartě",
+    "none": "nic není nahrané",
+    "unknown": "nepoznáno",
+}
+
+
+async def server_state(request: Request) -> dict:
+    """Živý stav pro stránku Stav i pro pruh nad logem."""
+    from .mgmt import backends_status
+    client = request.app.state.client
+    ollama = await ollama_status(client, config.UPSTREAM)
+    snap = sched.snapshot()
+    jobs = worker.snapshot()
+    notes = []
+    if not ollama["ok"]:
+        notes.append(("bad", "Ollama neodpovídá na " + config.UPSTREAM + " — " + str(ollama["error"])))
+    elif ollama["placement"] == "cpu":
+        notes.append(("bad", "Ollama má model v RAM, ne ve VRAM. Po restartu nejspíš nevidí kartu "
+                             "(chybí --gpus all / NVIDIA runtime), nebo se model nevešel. "
+                             "Odpovědi budou 10-30× pomalejší."))
+    elif ollama["placement"] == "split":
+        notes.append(("warn", "Model se do VRAM vešel jen částí, zbytek počítá CPU. "
+                              "Menší kvantizace nebo kratší kontext to spraví."))
+    if not jobs["enabled"]:
+        notes.append(("bad", "Fronta úloh je vypnutá — úlohy zůstanou viset ve stavu queued. "
+                             "Zapni ji v Nastavení (jobs_enabled)."))
+    elif jobs.get("by_status", {}).get("queued") and not jobs["running"]:
+        why = ("interaktivní dotaz má přednost" if sched.interactive_pending() else
+               "čeká se, až bude volno (podrobnosti níž)")
+        notes.append(("warn", "Ve frontě čekají úlohy a žádná neběží — " + why + "."))
+    if not snap["enabled"]:
+        notes.append(("warn", "Plánovač modelů je vypnutý: dotazy na různé modely půjdou na "
+                              "Ollamu naráz a budou si přehazovat VRAM."))
+    if snap["last_evict_error"]:
+        notes.append(("warn", "Poslední uvolnění VRAM u GPU služby selhalo: "
+                      + str(snap["last_evict_error"])))
+    return {"ollama": ollama, "sched": snap, "jobs": jobs, "host": host_snapshot(),
+            "backends": await backends_status(client), "active": active(), "notes": notes,
+            "label": PLACEMENT_LABEL}
+
+
+@router.get("/stav", response_class=HTMLResponse)
+async def ui_status(request: Request):
+    """Co dělá server právě teď: karta, fronta, plánovač. Stránka se sama načítá."""
+    user = current_user(request)
+    if not user:
+        return login_redirect(request)
+    state = await server_state(request)
+    return render(request, "status.html", user, refresh=5, **state)
+
+
+@router.get("/stav.json", include_in_schema=False)
+async def ui_status_json(request: Request):
+    if not current_user(request):
+        return JSONResponse({"error": "nepřihlášen"}, status_code=401)
+    state = await server_state(request)
+    state.pop("label", None)
+    return JSONResponse(state)
 
 
 @router.get("/usage", response_class=HTMLResponse)

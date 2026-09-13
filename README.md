@@ -21,6 +21,9 @@ Open WebUI / aplikace ──► ollama-proxy :11435 ──► open-webui:11434 (
 - **Telemetrie Ollamy** v okamžiku dotazu: umístění modelu (gpu/split/cpu/none),
   % modelu ve VRAM, load hostitele, volná RAM, počet souběžných dotazů.
   Rozliší, jestli „neodpovídá“ znamená reload modelu, frontu nebo propad na CPU.
+- **Stránka Stav** (`/ui/stav`): živý pohled na kartu — co Ollama drží v paměti,
+  kolik z toho je ve VRAM, kdo drží GPU, co čeká ve frontě. Sama se načítá
+  po 5 s a nahlas řekne, když Ollama počítá na CPU nebo když stojí fronta úloh.
 - **Proxy pro komerční API**: klíče poskytovatelů (OpenAI, Anthropic, Gemini,
   OpenRouter, Groq, …) leží jen v proxy; aplikace dostanou proxy klíč `opx_…`.
   Tokeny se čtou z OpenAI, Anthropic i Gemini formátů, volitelně se počítá cena.
@@ -296,6 +299,38 @@ V logu má dotaz `provider = <slug>`; u `/audio/speech` je v `prompt_tokens`
 **počet znaků vstupu**, takže ceník „USD za 1M znaků“ u komerčního TTS
 (`/providers/openai/v1/audio/speech`) dá správnou cenu.
 
+### Počítá Ollama na GPU? (stránka Stav)
+
+Ollama po restartu **bez viditelné karty naběhne dál** a jen tiše přepne na
+procesor — nic nespadne, jen je všechno desetkrát pomalejší. Jediný spolehlivý
+znak je `size_vram` v `/api/ps`: kolik z modelu je opravdu ve VRAM.
+
+`/ui/stav` to ukazuje živě (obnovuje se po 5 s) a rovnou z toho dělá závěr:
+
+| stav | co to znamená |
+|---|---|
+| `gpu` | 100 % modelu ve VRAM, počítá karta |
+| `split` | část se nevešla, zbytek dopočítává CPU — pomalejší, ale funguje |
+| `cpu` | **ve VRAM není nic** — Ollama kartu nevidí, nebo se model nevešel vůbec |
+| `none` | nic není nahrané, první dotaz model natáhne |
+
+Stránka kromě toho říká, kdo drží kartu (plánovač), co čeká ve frontě úloh
+a jestli vůbec běží pracovník fronty — což je nejčastější důvod, proč se
+„úlohy nevyhodnocují“. Pruh s tímtéž je i nad logem na hlavní stránce.
+
+Bez GUI totéž zjistíš takhle:
+
+```bash
+curl -s http://server:11434/api/ps | jq '.models[] | {name, size, size_vram}'
+docker exec -it ollama nvidia-smi          # vidí kontejner kartu?
+docker logs ollama 2>&1 | grep -i "cuda\|gpu\|library"   # co našel při startu
+```
+
+Když `nvidia-smi` v kontejneru selže, chybí `--gpus all` (v compose
+`deploy.resources.reservations.devices`) nebo NVIDIA Container Toolkit na
+hostiteli; po restartu TrueNASu se to stává, když se ovladač nenahraje dřív
+než kontejner.
+
 ### JSON API pro ladění (`/mgmt/v1`)
 
 Autentizace `Authorization: Bearer opx_…`. Interaktivní dokumentace na
@@ -310,6 +345,7 @@ curl -H "$H" 'http://server:11435/mgmt/v1/models'                           # mo
 curl -H "$H" 'http://server:11435/mgmt/v1/health'                           # stav (placement, load, verze, commit)
 curl -H "$H" -X POST 'http://server:11435/mgmt/v1/keys' -d '{"name":"app","role":"client","allowed_models":["gemma4","nomic-embed-text"]}' -H 'content-type: application/json'
 curl -H "$H" 'http://server:11435/mgmt/v1/models/status'                    # co je v paměti Ollamy, kdo drží GPU, fronta
+curl -s http://server:11434/api/ps | jq '.models[] | {name, size, size_vram}'   # přímo z Ollamy: size_vram = 0 → počítá CPU
 curl -H "$H" -X POST 'http://server:11435/mgmt/v1/models/load' -d '{"model":"gemma4:12b","wait_s":30}' -H 'content-type: application/json'
 curl -H "$H" -X POST 'http://server:11435/mgmt/v1/jobs' -d '{"path":"/api/chat","body":{"model":"gemma4:12b","messages":[…]}}' -H 'content-type: application/json'
 curl -H "$H" 'http://server:11435/mgmt/v1/jobs?status=queued'               # fronta úloh; /jobs/{id} = stav + výsledek

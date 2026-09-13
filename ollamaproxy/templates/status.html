@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Stav{% endblock %}
+{% block content %}
+<h1>Stav serveru</h1>
+<p class="sub">Živý pohled na kartu a fronty. Stránka se sama načítá po {{ refresh }} s · upstream {{ upstream }}</p>
+
+{% for level, text in notes %}
+<div class="flash {{ 'bad' if level == 'bad' else '' }}" {{ 'style=border-color:var(--warn);color:var(--warn)' if level == 'warn' }}>{{ text }}</div>
+{% endfor %}
+
+<div class="stats">
+  <div class="stat"><b class="{{ 'ok' if ollama.ok else 'err' }}">{{ 'odpovídá' if ollama.ok else 'mlčí' }}</b><span>Ollama{% if ollama.version %} {{ ollama.version }}{% endif %}</span></div>
+  <div class="stat"><b class="{{ ollama.placement }}">{{ ollama.placement }}</b><span>{{ label[ollama.placement] }}</span></div>
+  <div class="stat"><b>{{ ollama.vram_bytes | size }}</b><span>drží ve VRAM</span></div>
+  <div class="stat"><b>{{ ollama.models | length }}</b><span>v paměti{% if ollama.installed %} · {{ ollama.installed }} staženo{% endif %}</span></div>
+  <div class="stat"><b>{{ active }}</b><span>dotazů právě běží</span></div>
+  <div class="stat"><b>{{ sched.waiting.values() | sum }}</b><span>dotazů čeká na kartu</span></div>
+  <div class="stat"><b class="{{ 'err' if not jobs.enabled else '' }}">{{ jobs.by_status.get('queued', 0) | num }}</b><span>úloh ve frontě{{ ' · pracovník vypnutý' if not jobs.enabled }}</span></div>
+  {% if host.load1 is not none %}<div class="stat"><b>{{ host.load1 | fmt }}</b><span>load hostitele</span></div>{% endif %}
+  {% if host.mem_avail_pct is not none %}<div class="stat"><b>{{ host.mem_avail_pct | fmt }} %</b><span>volné RAM</span></div>{% endif %}
+</div>
+
+<h2>Modely v paměti Ollamy</h2>
+<div class="tblwrap"><table>
+<tr><th>model<th>umístění<th class="num">ve VRAM<th class="num">velikost<th class="num">podíl na GPU<th>parametry<th>kvantizace<th class="num">kontext<th>vyprší</tr>
+{% for m in ollama.models %}
+<tr>
+  <td>{{ m.name }}
+  <td class="{{ m.placement }}">{{ m.placement }}
+  <td class="num">{{ m.size_vram | size }}
+  <td class="num">{{ m.size | size }}
+  <td class="num {{ m.placement }}">{{ m.vram_pct | fmt }} %
+  <td class="mute">{{ m.parameter_size or '—' }}
+  <td class="mute">{{ m.quantization or '—' }}
+  <td class="num mute">{{ m.context_length | num if m.context_length else '—' }}
+  <td class="mute">{{ m.expires_at | ts }}
+</tr>
+{% else %}
+<tr><td colspan="9" class="mute">{{ 'Ollama neodpovídá' if not ollama.ok else 'nic není nahrané — první dotaz model natáhne' }}</td></tr>
+{% endfor %}
+</table></div>
+<p class="help">Rozhoduje <code>size_vram</code> z <code>/api/ps</code>: 100 % = celý model na kartě,
+0 % = počítá procesor. Ollama po restartu bez viditelné karty naběhne dál a jen tiše přepne na CPU —
+jinak se to nepozná než podle rychlosti.</p>
+
+<div class="grid">
+<div>
+<h2>Plánovač modelů</h2>
+<div class="kv">
+  <div>zapnutý</div><div class="{{ 'ok' if sched.enabled else 'err' }}">{{ 'ano' if sched.enabled else 'ne' }}</div>
+  <div>kartu drží</div><div>{{ sched.admitted or '—' }}{% if sched.backend %} <span class="mute">({{ sched.backend }})</span>{% endif %}</div>
+  <div>přepíná se na</div><div class="{{ 'warn' if sched.evicting }}">{{ sched.evicting or '—' }}</div>
+  <div>běží</div><div>{{ sched.in_flight or '—' }}</div>
+  <div>čeká</div><div>{{ sched.waiting or '—' }}{% if sched.oldest_wait_s %} <span class="mute">nejdéle {{ sched.oldest_wait_s | fmt }} s</span>{% endif %}</div>
+  <div>ticho od</div><div class="mute">{{ sched.idle_s | fmt }} s (člověk {{ sched.interactive_idle_s | fmt }} s)</div>
+  <div>přepnutí / uvolnění</div><div class="mute">{{ sched.switches }} / {{ sched.evictions }}</div>
+  <div>poslední chyba uvolnění</div><div class="{{ 'err' if sched.last_evict_error }}">{{ sched.last_evict_error or '—' }}</div>
+</div>
+</div>
+
+<div>
+<h2>Fronta úloh</h2>
+<div class="kv">
+  <div>pracovník</div><div class="{{ 'ok' if jobs.enabled else 'err' }}">{{ 'běží' if jobs.enabled else 'vypnutý' }}</div>
+  <div>právě dělá</div><div>{% if jobs.running %}#{{ jobs.running.id }} {{ jobs.running.model }} <span class="mute">({{ jobs.running.key_name }})</span>{% else %}—{% endif %}</div>
+  <div>ve frontě</div><div>{{ jobs.queued_by_model or '—' }}</div>
+  <div>nejstarší čeká od</div><div class="mute">{{ jobs.oldest_queued_at | ts or '—' }}</div>
+  <div>stavy</div><div class="mute">{{ jobs.by_status or '—' }}</div>
+  <div>hotovo / přerušeno</div><div class="mute">{{ jobs.runs }} / {{ jobs.preempted }}</div>
+  <div>limity</div><div class="mute">max. čekání {{ jobs.max_wait_s | fmt(0) }} s · klid po člověku {{ jobs.idle_s | fmt(0) }} s</div>
+</div>
+<p class="help"><a href="/ui/jobs">Podrobně na stránce Úlohy</a></p>
+</div>
+</div>
+
+{% if backends %}
+<h2>GPU služby</h2>
+<div class="tblwrap"><table>
+<tr><th>služba<th>stav<th>modely<th>v paměti</tr>
+{% for slug, b in backends.items() %}
+<tr><td>{{ slug }}
+  <td class="{{ 'ok' if b.ok else 'err' }}">{{ 'odpovídá' if b.ok else b.error }}
+  <td class="mute">{{ b.models | join(', ') or '—' }}
+  <td>{{ b.loaded | join(', ') or '—' }}</tr>
+{% endfor %}
+</table></div>
+{% endif %}
+{% endblock %}
