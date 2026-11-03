@@ -27,13 +27,13 @@ Autentizace: `Authorization: Bearer opx_…` (klíč z GUI → API klíče) nebo
 | PUT | `/keys/{id}` | admin | `{allowed_models?, max_jobs?, rate_per_min?}` — změna omezení existujícího klíče (0 = výchozí z nastavení) |
 | PUT | `/keys/{id}/models` | admin | `{allowed_models: []}` — jen seznam modelů |
 | DELETE | `/keys/{id}` | admin | |
-| GET / PUT | `/settings` | admin | `retention_days`, `log_bodies`, `ollama_require_key`, `sched_enabled`, `sched_hold_s`, `sched_max_wait_s`, `jobs_enabled`, `jobs_max_wait_s`, `jobs_idle_s`, `jobs_preempt_s`, `jobs_max_queued`, `jobs_retention_days`, `rate_limit_per_min`, `gpu_evict_timeout_s` (čekání na uvolnění VRAM při přepnutí backendu), `gpu_request_timeout_s` (nejdelší ticho dotazu na GPU službu) |
+| GET / PUT | `/settings` | admin | `retention_days`, `log_bodies`, `ollama_enabled` (0 = lokální Ollama se nepoužívá: kořen proxy vrací 503, v katalogu `/models` není, úlohy s `provider: ollama` se odmítnou), `ollama_require_key`, `sched_enabled`, `sched_hold_s`, `sched_max_wait_s`, `jobs_enabled`, `jobs_max_wait_s`, `jobs_idle_s`, `jobs_preempt_s`, `jobs_max_queued`, `jobs_retention_days`, `rate_limit_per_min`, `gpu_evict_timeout_s` (čekání na uvolnění VRAM při přepnutí backendu), `gpu_request_timeout_s` (nejdelší ticho dotazu na GPU službu) |
 
 Inference (loguje se automaticky; i `/audio/speech`, `/audio/transcriptions`):
 
 | cesta | kam jde | klíč | plánovač |
 |---|---|---|---|
-| `/api/*`, `/v1/*` (kořen) | `OLLAMA_UPSTREAM`; POST s modelem GPU služby → její `base_url` | nepovinný (nastavení `ollama_require_key`); pro GPU službu povinný | ano (POST na chat/generate/embed; GPU služba: každý POST s modelem) |
+| `/api/*`, `/v1/*` (kořen) | `OLLAMA_UPSTREAM` (503, když `ollama_enabled` = 0); POST s modelem GPU služby → její `base_url` (jede i bez Ollamy) | nepovinný (nastavení `ollama_require_key`); pro GPU službu povinný | ano (POST na chat/generate/embed; GPU služba: každý POST s modelem) |
 | `/providers/{slug}/…` | `base_url` poskytovatele + zbytek cesty | povinný; proxy ho nahradí klíčem poskytovatele | jen typ `gpu` |
 
 Hlavička `X-Opx-Wait: <s>` omezí čekání v plánovači (0 = nečekat); do upstreamu se nepřeposílá.

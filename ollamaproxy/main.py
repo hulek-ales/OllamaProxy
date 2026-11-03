@@ -25,7 +25,7 @@ def backend_of(model: str) -> str:
 
 async def all_loaded(client: httpx.AsyncClient) -> list:
     """Modely v paměti napříč backendy. Nedostupná GPU služba = prázdná (nesmí shodit Ollamu)."""
-    names = list(await ps_models(client, config.UPSTREAM))
+    names = list(await ps_models(client, config.UPSTREAM)) if db.ollama_on() else []
     for prov in db.gpu_providers():
         try:
             names.extend(await backend_ps(client, prov["base_url"], prov["api_key"], provider_models(prov)))
@@ -43,6 +43,8 @@ async def evict_backend(client: httpx.AsyncClient, slug: str):
     """Řekne backendu, ať uvolní VRAM, a počká, až podle jeho /api/ps opravdu nic nedrží.
     Časový strop hlídá plánovač (gpu_evict_timeout_s)."""
     if slug == "ollama":
+        if not db.ollama_on():
+            return                      # není co uvolňovat, server je zrušený
         for name in await ps_models(client, config.UPSTREAM):
             # prázdný generate s keep_alive 0 = Ollama model vyhodí; embedding model přes /api/embed
             r = await client.post(config.UPSTREAM + "/api/generate",
@@ -109,7 +111,8 @@ async def lifespan(app: FastAPI):
     sched.evictor = lambda slug: evict_backend(app.state.client, slug)
     worker.start(lambda: app.state.client)
     task = asyncio.create_task(retention_loop())
-    print("proxy " + config.VERSION + " ready, upstream = " + config.UPSTREAM
+    print("proxy " + config.VERSION + " ready, upstream = "
+          + (config.UPSTREAM if db.ollama_on() else "(lokální Ollama vypnutá)")
           + (", commit " + config.GIT_COMMIT if config.GIT_COMMIT else ""), flush=True)
     try:
         yield

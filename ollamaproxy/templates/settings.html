@@ -13,6 +13,11 @@
     <input type="number" id="retention_days" name="retention_days" min="0" value="{{ settings.retention_days }}"></div>
   <div class="field"><label><input type="checkbox" name="log_bodies" value="1" {{ 'checked' if settings.log_bodies == '1' }}> ukládat text dotazu a odpovědi</label>
     <div class="help">Bez toho se loguje jen model, tokeny a časy.</div></div>
+  <div class="field"><label><input type="checkbox" name="ollama_enabled" value="1" {{ 'checked' if settings.ollama_enabled == '1' }}> používat lokální Ollamu ({{ upstream }})</label>
+    <div class="help">Vypni, až lokální Ollama server zrušíš a GPU bude dělat něco jiného. Proxy ji pak
+      nezkouší: na Stavu místo červené svítí „nepoužívá se“, dotazy na kořen proxy dostanou 503,
+      <code>/mgmt/v1/models</code> ji nenabízí a úlohy s poskytovatelem <code>ollama</code> se odmítnou
+      hned, místo aby visely ve frontě. Poskytovatelé (komerční API) a GPU služby jedou dál.</div></div>
   <div class="field"><label><input type="checkbox" name="ollama_require_key" value="1" {{ 'checked' if settings.ollama_require_key == '1' }}> vyžadovat proxy klíč i pro holé Ollama API</label>
     <div class="help">Pozor: pak musí klíč posílat i Open WebUI (Connections → Ollama API → klíč). Komerční poskytovatelé klíč vyžadují vždy.</div></div>
   <h2>Plánovač modelů (lokální Ollama)</h2>

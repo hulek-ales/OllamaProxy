@@ -28,7 +28,7 @@ from .db import db, now_iso
 from .jobs import limiter
 from .providers import auth_headers, cost_usd, parse_pricing
 from .scheduler import sched
-from .telemetry import active, bump, gpu_snapshot, host_snapshot
+from .telemetry import OLLAMA_OFF, active, bump, gpu_snapshot, host_snapshot
 
 router = APIRouter()
 
@@ -331,13 +331,23 @@ async def forward(request: Request, url: str, headers: dict, body: bytes, *,
 @router.get("/healthz", include_in_schema=False)
 async def healthz(request: Request):
     snap = host_snapshot()
-    snap.update(await gpu_snapshot(request.app.state.client, config.UPSTREAM))
+    snap.update(await gpu_snapshot(request.app.state.client, config.UPSTREAM)
+                if db.ollama_on() else OLLAMA_OFF)
     snap["concurrent"] = active()
     snap["upstream"] = config.UPSTREAM
     snap["version"] = config.VERSION
     snap["commit"] = config.GIT_COMMIT
     snap["scheduler"] = sched.snapshot()
     return snap
+
+
+def empty_model_list(path: str) -> dict:
+    """Prázdný výpis modelů v dialektu dané cesty (vypnutá Ollama)."""
+    if path == "/api/tags":
+        return {"models": []}
+    if path == "/v1beta/models":
+        return {"models": []}
+    return {"object": "list", "data": []}
 
 
 def _model_filter(principal):
@@ -420,6 +430,14 @@ async def ollama_proxy(path: str, request: Request):
             return limited
         return await _forward_provider(request, prov, "/" + path, body, req_obj, model, principal)
 
+    if not db.ollama_on():
+        # Ollama server zrušen: radši jasná odpověď než mlčící spojení do prázdna.
+        # Výpis modelů ať je prázdný, aby klient (Open WebUI) ukázal „nic“, ne chybu.
+        if request.method == "GET" and ("/" + path).endswith(LIST_PATHS):
+            return JSONResponse(empty_model_list("/" + path))
+        return JSONResponse({"error": "local Ollama is disabled in this proxy "
+                                      "(settings: ollama_enabled=0); use /providers/<slug>/… "
+                                      "or a model served by a gpu provider"}, status_code=503)
     if model and principal is not None and not principal.may_model(model):
         return deny_model(request, "ollama", principal, model, req_obj)
     limited = rate_limited(request, "ollama", principal, model, req_obj)

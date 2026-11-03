@@ -4,7 +4,8 @@
 <h1>Log dotazů</h1>
 <p class="sub">upstream {{ upstream }} · {{ total | num }} záznamů{% if filters.since or filters.model or filters.provider or filters.placement or filters.key_name or filters.user or filters.status or filters.q %} (filtrováno){% endif %} · verze {{ version }}{% if commit %} @ {{ commit }}{% endif %}</p>
 
-{% if live.placement == 'cpu' %}
+{% if not live.enabled %}
+{% elif live.placement == 'cpu' %}
 <div class="flash bad">Ollama počítá <b>na CPU</b> — model není ve VRAM. Po restartu nejspíš nevidí kartu.
 <a href="/ui/stav">Podrobnosti na Stavu</a></div>
 {% elif not live.ok %}
@@ -15,9 +16,11 @@
   <span>Ollama: <b class="{{ live.placement }}">{{ live.placement }}</b>
     <span class="mute">{{ live_label[live.placement] }}</span></span>
   <span class="mute">|</span>
+  {% if live.enabled %}
   <span>v paměti:
     {%- for m in live.models %} {{ m.name }} <span class="mute">{{ m.size_vram | size }} / {{ m.size | size }}</span>{{ ',' if not loop.last }}{% else %} <span class="mute">nic</span>{% endfor %}</span>
   <span class="mute">|</span>
+  {% endif %}
   <span>plánovač: {{ live_sched.admitted or '—' }}{% if live_sched.evicting %} <span class="split">→ {{ live_sched.evicting }}</span>{% endif %}
     <span class="mute">běží {{ live_sched.in_flight.values() | sum }}, čeká {{ live_sched.waiting.values() | sum }}</span></span>
   <span class="mute">|</span>

@@ -23,7 +23,7 @@ from .jobs import ALLOWED_JOB_PATHS, job_view, key_limit, limiter, worker
 from .providers import (backend_load, backend_ps, client_base_url, fetch_models, mask_key,
                         parse_pricing, provider_models)
 from .scheduler import sched
-from .telemetry import active, gpu_snapshot, host_snapshot
+from .telemetry import OLLAMA_OFF, active, gpu_snapshot, host_snapshot
 
 router = APIRouter(prefix="/mgmt/v1", tags=["mgmt"])
 
@@ -67,7 +67,8 @@ def provider_view(row: dict, request: Request) -> dict:
 async def health(request: Request):
     require(request)
     snap = host_snapshot()
-    snap.update(await gpu_snapshot(request.app.state.client, config.UPSTREAM))
+    snap.update(await gpu_snapshot(request.app.state.client, config.UPSTREAM)
+                if db.ollama_on() else OLLAMA_OFF)
     snap["concurrent"] = active()
     snap["upstream"] = config.UPSTREAM
     snap["version"] = config.VERSION
@@ -117,16 +118,20 @@ async def stats(request: Request, since: Optional[str] = "24h"):
 
 @router.get("/models")
 async def models(request: Request):
-    """Modely dostupné přes proxy: lokální Ollama + každý zapnutý poskytovatel."""
+    """Modely dostupné přes proxy: lokální Ollama + každý zapnutý poskytovatel.
+
+    Vypnutá lokální Ollama (`ollama_enabled` = 0) v katalogu není vůbec — klient si
+    tak nemá co vybrat a nemusí rozlišovat „nenabízí se“ od „neodpovídá“."""
     p = require(request)
     client = request.app.state.client
     out = {}
-    try:
-        out["ollama"] = {"ok": True, "base_url": proxy_root(request),
-                         "models": [m for m in await fetch_models(client, "ollama", config.UPSTREAM, "")
-                                    if p.may_model(m)]}
-    except Exception as exc:
-        out["ollama"] = {"ok": False, "error": str(exc), "models": []}
+    if db.ollama_on():
+        try:
+            out["ollama"] = {"ok": True, "base_url": proxy_root(request),
+                             "models": [m for m in await fetch_models(client, "ollama", config.UPSTREAM, "")
+                                        if p.may_model(m)]}
+        except Exception as exc:
+            out["ollama"] = {"ok": False, "error": str(exc), "models": []}
     for prov in db.list_providers():
         if not prov["enabled"] or not p.may_use(prov["slug"]):
             continue
@@ -160,6 +165,8 @@ async def _load_model(client, model: str, keep_alive):
     (nepovinné — bez něj model nahraje první dotaz). Místo v plánovači se vrátí po doběhnutí."""
     try:
         slug = sched.backend_of(model)
+        if slug == "ollama" and not db.ollama_on():
+            return "local Ollama is disabled in settings (ollama_enabled=0)"
         if slug != "ollama":
             prov = db.get_provider(slug)
             if prov is None:
@@ -291,6 +298,9 @@ def _check_job(p, j: JobIn):
             raise HTTPException(422, "body.model is required")
     if provider == "ollama" and not model:
         raise HTTPException(422, "body.model is required")
+    if provider == "ollama" and not db.ollama_on():
+        raise HTTPException(422, "local Ollama is disabled in settings (ollama_enabled=0); "
+                                 "send the job to a configured provider instead")
     if model and not p.may_model(model):
         raise HTTPException(403, "model '" + model + "' is not allowed for this key")
     not_before = None
@@ -577,6 +587,7 @@ async def delete_key(kid: int, request: Request):
 class SettingsIn(BaseModel):
     retention_days: Optional[int] = None
     log_bodies: Optional[bool] = None
+    ollama_enabled: Optional[bool] = None
     ollama_require_key: Optional[bool] = None
     sched_enabled: Optional[bool] = None
     sched_hold_s: Optional[float] = Field(default=None, ge=0, le=3600)
@@ -605,6 +616,8 @@ async def put_settings(body: SettingsIn, request: Request):
         db.set_setting("retention_days", max(0, body.retention_days))
     if body.log_bodies is not None:
         db.set_setting("log_bodies", "1" if body.log_bodies else "0")
+    if body.ollama_enabled is not None:
+        db.set_setting("ollama_enabled", "1" if body.ollama_enabled else "0")
     if body.ollama_require_key is not None:
         db.set_setting("ollama_require_key", "1" if body.ollama_require_key else "0")
     if body.sched_enabled is not None:

@@ -106,6 +106,7 @@ def test_sched_settings_roundtrip(admin):
     assert sched.hold_s == 3.0 and sched.max_wait_s == 45.0 and sched.enabled
     csrf = admin.get("/ui/settings").text.split('name="csrf" value="')[1].split('"')[0]
     r = admin.post("/ui/settings", data={"csrf": csrf, "retention_days": "0", "log_bodies": "1",
+                                         "ollama_enabled": "1",   # prohlížeč pošle celý formulář
                                          "sched_enabled": "1", "sched_hold_s": "10", "sched_max_wait_s": "90"},
                    follow_redirects=False)
     assert r.status_code == 303

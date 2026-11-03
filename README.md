@@ -67,6 +67,25 @@ Open WebUI → Admin → Settings → Connections → Ollama API: `http://ollama
 Holé Ollama API klíč nevyžaduje (dá se zapnout v Nastavení, pak ho musí posílat i
 Open WebUI).
 
+### Vyřazení lokální Ollamy
+
+Až lokální Ollama server zrušíš (GPU je potřeba na něco jiného, LLM jedou přes
+komerční poskytovatele), vypni v **Nastavení** přepínač „používat lokální Ollamu“
+(`ollama_enabled` = 0, API `PUT /mgmt/v1/settings`). Proxy ji pak nezkouší:
+
+- **Stav** místo červeného „Ollama neodpovídá“ hlásí „nepoužívá se“ a mlčící
+  upstream nepočítá za chybu;
+- dotazy na kořen proxy dostanou **503** s vysvětlením (výpisy modelů zůstanou
+  platné, jen prázdné, aby Open WebUI neukazoval chybu);
+- v katalogu `GET /mgmt/v1/models` lokální Ollama **není**;
+- úlohy s `provider: ollama` se odmítnou hned (422), ty už zařazené spadnou
+  s chybou, místo aby visely ve frontě;
+- plánovač na ni nečeká a neuvolňuje VRAM něčeho, co neběží.
+
+Poskytovatelé (OpenAI, Anthropic, Google…) a GPU služby typu `gpu` (TTS…) jedou
+dál beze změny — kartu si rozdělí mezi sebou. Až Ollama server zase bude, stačí
+přepínač vrátit.
+
 ## Kdo kolik spotřeboval
 
 Každá aplikace dostane vlastní klíč (GUI → API klíče, role `client`) a posílá ho

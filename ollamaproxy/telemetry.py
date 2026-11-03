@@ -44,6 +44,10 @@ def host_snapshot() -> dict:
     return out
 
 
+# stav modelu na kartě; "off" = lokální Ollama se vůbec nepoužívá
+OLLAMA_OFF = {"placement": "off", "vram_pct": None, "loaded_model": None}
+
+
 def placement_of(pct) -> str:
     """Z podílu modelu ve VRAM udělá verdikt: gpu / split / cpu."""
     if pct is None:
@@ -55,14 +59,21 @@ def placement_of(pct) -> str:
     return "split"
 
 
-async def ollama_status(client: httpx.AsyncClient, upstream: str, light: bool = False) -> dict:
+async def ollama_status(client: httpx.AsyncClient, upstream: str, light: bool = False,
+                        enabled: bool = True) -> dict:
     """Živý stav Ollamy pro GUI: verze, co drží v paměti a jestli to je na kartě.
 
     `size_vram` z /api/ps je jediná pravda o tom, kde model počítá — Ollama po
     restartu bez viditelné karty naběhne dál, jen tiše na CPU, a pozná se to
-    přesně tady (`size_vram` = 0)."""
-    out = {"ok": False, "upstream": upstream, "error": None, "version": None,
+    přesně tady (`size_vram` = 0).
+
+    `enabled=False` (nastavení `ollama_enabled`) = lokální Ollama se nepoužívá:
+    nic se nezkouší, stav je `off`, ne chyba."""
+    out = {"ok": False, "enabled": enabled, "upstream": upstream, "error": None, "version": None,
            "models": [], "installed": None, "placement": "none", "vram_bytes": 0}
+    if not enabled:
+        out["placement"] = "off"
+        return out
     try:
         resp = await client.get(upstream + "/api/ps", timeout=2.0)
         resp.raise_for_status()

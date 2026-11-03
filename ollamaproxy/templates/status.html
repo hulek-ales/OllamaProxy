@@ -9,10 +9,14 @@
 {% endfor %}
 
 <div class="stats">
+{% if ollama.enabled %}
   <div class="stat"><b class="{{ 'ok' if ollama.ok else 'err' }}">{{ 'odpovídá' if ollama.ok else 'mlčí' }}</b><span>Ollama{% if ollama.version %} {{ ollama.version }}{% endif %}</span></div>
   <div class="stat"><b class="{{ ollama.placement }}">{{ ollama.placement }}</b><span>{{ label[ollama.placement] }}</span></div>
   <div class="stat"><b>{{ ollama.vram_bytes | size }}</b><span>drží ve VRAM</span></div>
   <div class="stat"><b>{{ ollama.models | length }}</b><span>v paměti{% if ollama.installed %} · {{ ollama.installed }} staženo{% endif %}</span></div>
+{% else %}
+  <div class="stat"><b class="mute">nepoužívá se</b><span>lokální Ollama</span></div>
+{% endif %}
   <div class="stat"><b>{{ active }}</b><span>dotazů právě běží</span></div>
   <div class="stat"><b>{{ sched.waiting.values() | sum }}</b><span>dotazů čeká na kartu</span></div>
   <div class="stat"><b class="{{ 'err' if not jobs.enabled else '' }}">{{ jobs.by_status.get('queued', 0) | num }}</b><span>úloh ve frontě{{ ' · pracovník vypnutý' if not jobs.enabled }}</span></div>
@@ -20,6 +24,7 @@
   {% if host.mem_avail_pct is not none %}<div class="stat"><b>{{ host.mem_avail_pct | fmt }} %</b><span>volné RAM</span></div>{% endif %}
 </div>
 
+{% if ollama.enabled %}
 <h2>Modely v paměti Ollamy</h2>
 <div class="tblwrap"><table>
 <tr><th>model<th>umístění<th class="num">ve VRAM<th class="num">velikost<th class="num">podíl na GPU<th>parametry<th>kvantizace<th class="num">kontext<th>vyprší</tr>
@@ -42,6 +47,12 @@
 <p class="help">Rozhoduje <code>size_vram</code> z <code>/api/ps</code>: 100 % = celý model na kartě,
 0 % = počítá procesor. Ollama po restartu bez viditelné karty naběhne dál a jen tiše přepne na CPU —
 jinak se to nepozná než podle rychlosti.</p>
+{% else %}
+<h2>Lokální Ollama</h2>
+<p class="help">V Nastavení je vypnutá (<code>ollama_enabled</code>), takže se na <code>{{ upstream }}</code>
+nic neposílá a nic se odtud nečte. Modely obsluhují poskytovatelé a GPU služby níž; plánovač přepíná
+kartu jen mezi nimi. Až Ollama server zase bude, stačí přepínač vrátit.</p>
+{% endif %}
 
 <div class="grid">
 <div>

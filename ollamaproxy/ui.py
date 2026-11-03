@@ -190,7 +190,8 @@ async def ui_list(request: Request):
         "model": filters["model"], "provider": filters["provider"], "placement": filters["placement"],
         "key": filters["key_name"], "user": filters["user"], "status": filters["status"],
         "since": filters["since"], "q": filters["q"]}.items() if v)
-    live = await ollama_status(request.app.state.client, config.UPSTREAM, light=True)
+    live = await ollama_status(request.app.state.client, config.UPSTREAM, light=True,
+                              enabled=db.ollama_on())
     return render(request, "list.html", user, rows=rows, total=total, page=page_no, per=per,
                   live=live, live_sched=sched.snapshot(), live_jobs=worker.snapshot(),
                   live_label=PLACEMENT_LABEL,
@@ -206,6 +207,7 @@ PLACEMENT_LABEL = {
     "split": "část v RAM — model se nevešel do VRAM",
     "cpu": "na CPU — Ollama nepočítá na kartě",
     "none": "nic není nahrané",
+    "off": "nepoužívá se — vypnutá v nastavení",
     "unknown": "nepoznáno",
 }
 
@@ -214,11 +216,15 @@ async def server_state(request: Request) -> dict:
     """Živý stav pro stránku Stav i pro pruh nad logem."""
     from .mgmt import backends_status
     client = request.app.state.client
-    ollama = await ollama_status(client, config.UPSTREAM)
+    ollama = await ollama_status(client, config.UPSTREAM, enabled=db.ollama_on())
     snap = sched.snapshot()
     jobs = worker.snapshot()
     notes = []
-    if not ollama["ok"]:
+    if not ollama["enabled"]:
+        notes.append(("info", "Lokální Ollama se nepoužívá (vypnutá v Nastavení). Dotazy jdou na "
+                              "poskytovatele, kartu obsluhují jen GPU služby. Mlčící upstream "
+                              "proto není chyba."))
+    elif not ollama["ok"]:
         notes.append(("bad", "Ollama neodpovídá na " + config.UPSTREAM + " — " + str(ollama["error"])))
     elif ollama["placement"] == "cpu":
         notes.append(("bad", "Ollama má model v RAM, ne ve VRAM. Po restartu nejspíš nevidí kartu "
@@ -234,9 +240,9 @@ async def server_state(request: Request) -> dict:
         why = ("interaktivní dotaz má přednost" if sched.interactive_pending() else
                "čeká se, až bude volno (podrobnosti níž)")
         notes.append(("warn", "Ve frontě čekají úlohy a žádná neběží — " + why + "."))
-    if not snap["enabled"]:
+    if not snap["enabled"] and (ollama["enabled"] or db.gpu_providers()):
         notes.append(("warn", "Plánovač modelů je vypnutý: dotazy na různé modely půjdou na "
-                              "Ollamu naráz a budou si přehazovat VRAM."))
+                              "kartu naráz a budou si přehazovat VRAM."))
     if snap["last_evict_error"]:
         notes.append(("warn", "Poslední uvolnění VRAM u GPU služby selhalo: "
                       + str(snap["last_evict_error"])))
@@ -524,6 +530,7 @@ async def settings_save(request: Request):
         days = 0
     db.set_setting("retention_days", days)
     db.set_setting("log_bodies", "1" if form.get("log_bodies") else "0")
+    db.set_setting("ollama_enabled", "1" if form.get("ollama_enabled") else "0")
     db.set_setting("ollama_require_key", "1" if form.get("ollama_require_key") else "0")
     db.set_setting("sched_enabled", "1" if form.get("sched_enabled") else "0")
     db.set_setting("jobs_enabled", "1" if form.get("jobs_enabled") else "0")

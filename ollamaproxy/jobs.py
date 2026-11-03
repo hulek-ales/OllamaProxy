@@ -205,9 +205,12 @@ class JobWorker:
         if not queued:
             return None
         gpu = gpu_slugs()
-        commercial = [j for j in queued if j["provider"] != "ollama" and j["provider"] not in gpu]
-        if commercial:
-            return commercial[0]
+        # úlohy, které kartu nepotřebují: komerční poskytovatelé — a úlohy pro lokální
+        # Ollamu, když je vypnutá (ty jen rychle spadnou, ať nedrží frontu)
+        free = [j for j in queued
+                if j["provider"] not in gpu and (j["provider"] != "ollama" or not db.ollama_on())]
+        if free:
+            return free[0]
         if sched.interactive_pending():
             return None
         now = time.monotonic()
@@ -295,6 +298,11 @@ class JobWorker:
         gpu = provider == "ollama"      # jde přes plánovač (Ollama nebo GPU služba)
         timeout = 3600.0
         if provider == "ollama":
+            if not db.ollama_on():
+                # přepínač padl, když už úloha ve frontě byla: ať to řekne, ne ať visí
+                db.finish_job(job["id"], "error",
+                              error="local Ollama is disabled in settings (ollama_enabled=0)")
+                return
             url = config.UPSTREAM + job["path"]
         else:
             prov = db.get_provider(provider)

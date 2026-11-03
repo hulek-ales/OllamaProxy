@@ -151,6 +151,7 @@ JOB_LIGHT_COLS = (
 SETTING_DEFAULTS = {
     "retention_days": "0",          # 0 = nemazat
     "log_bodies": config.LOG_BODIES_DEFAULT,
+    "ollama_enabled": "1",          # 0 = lokální Ollama se nepoužívá (server zrušen)
     "ollama_require_key": "0",      # 1 = i holé Ollama API chce proxy klíč
     "sched_enabled": "1",           # plánovač modelů pro lokální Ollamu (viz scheduler.py)
     "sched_hold_s": "10",           # po posledním dotazu drží GPU model ještě tolik sekund
@@ -303,6 +304,15 @@ class Database:
                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
             self.conn.commit()
         self._settings[key] = value
+
+    def ollama_on(self) -> bool:
+        """Používá se vestavěná lokální Ollama (OLLAMA_UPSTREAM)?
+
+        Když se GPU použije na něco jiného a Ollama server se zruší, nemá smysl
+        ji pořád zkoušet: bez tohohle přepínače by stav svítil červeně, dotazy
+        na kořen proxy padaly na spojení a plánovač čekal na uvolnění VRAM
+        něčeho, co neexistuje. Proxy pak obsluhuje jen poskytovatele a GPU služby."""
+        return self.setting("ollama_enabled") != "0"
 
     def public_settings(self) -> dict:
         return {k: self.setting(k) for k in SETTING_DEFAULTS}
